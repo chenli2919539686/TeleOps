@@ -227,13 +227,20 @@ class WorkspaceStore:
         db.execute("UPDATE agents SET status=? WHERE id=?", (status, agent_id))
 
     def delete_workspace(self, ws_id) -> tuple:
-        """删除业务域（默认域 core-net 受保护），并级联清理其下所有 Agent 实例。"""
+        """删除业务域（默认域 core-net 受保护），并级联清理其下所有数据。
+
+        级联范围：Agent 实例 + 需求 + 操作记录。
+        需求与消息没有指向 workspaces 的外键级联，若不显式清理会成为孤儿行；
+        业务域 id 一旦被复用（测试/重建同名域场景），新域会读到上一个域的残留。
+        """
         if ws_id == "core-net":
             raise ValueError("默认业务域「核心网运维域」不可删除")
         if not db.query_one("SELECT 1 FROM workspaces WHERE id=?", (ws_id,)):
             return False, "业务域不存在"
         if self.registry:
             self.registry.remove_by_workspace(ws_id)
-        # agents 随外键 ON DELETE CASCADE 自动清理
+        # agents 随外键 ON DELETE CASCADE 自动清理；需求/消息需显式删除
+        db.execute("DELETE FROM requirements WHERE workspace_id=?", (ws_id,))
+        db.execute("DELETE FROM messages WHERE workspace_id=?", (ws_id,))
         db.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
         return True, ""

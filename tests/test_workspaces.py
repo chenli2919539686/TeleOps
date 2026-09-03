@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 """业务域（多租户隔离）：CRUD / 域内 Agent 自动创建 / 派发模式 / 操作记录 / 级联删除。"""
+import uuid
+
+from tests.conftest import wait_job
+from tests.test_tool_reuse import TEMP_ALERT
 
 
 def test_create_workspace_with_agents(client, auth_headers, ws_id):
@@ -70,3 +74,45 @@ def test_delete_cascade(client, auth_headers):
     assert client.get(f"/agents?workspace_id={wid}").json()["agents"] == []
     # 域本身消失
     assert wid not in [w["id"] for w in client.get("/workspaces").json()["workspaces"]]
+
+
+def test_delete_cascade_requirements_and_messages(client, auth_headers):
+    """删域应一并清掉该域的需求与操作记录，不留孤儿行。
+
+    需求/消息表没有指向 workspaces 的外键级联，早期删域后这些行会残留；
+    域 id 若被复用（测试重建同名域、或 id 生成回退），新域会读到上一域的数据。
+    """
+    from src.api.server import tools as tool_registry
+    from src.core import db
+
+    name = "级联需求域-" + uuid.uuid4().hex[:6]
+    wid = client.post("/workspaces", headers=auth_headers,
+                      json={"name": name, "adapter_id": "alert-prometheus", "mode": "auto"}
+                      ).json()["id"]
+    try:
+        # 制造真实缺口，确保 raise 会登记一条需求
+        tool_registry.remove("temperature_probe")
+        r = client.post("/requirements/raise", headers=auth_headers,
+                        json={"workspace_id": wid, "alert": dict(TEMP_ALERT)})
+        assert r.status_code == 200, r.text
+        ok, res = wait_job(client, r.json()["job_id"], timeout=120)
+        assert ok, f"raise 失败：{res}"
+
+        reqs = db.query("SELECT id FROM requirements WHERE workspace_id=?", (wid,))
+        assert reqs, "删域前应有需求记录，否则本用例失去意义"
+
+        # 再写一条操作记录（raise 闭环本身不落 messages）
+        agent_id = client.get(f"/agents?workspace_id={wid}").json()["agents"][0]["id"]
+        mr = client.post(f"/workspaces/{wid}/messages", headers=auth_headers,
+                         json={"agent_id": agent_id, "kind": "info",
+                               "summary": "级联清理回归用记录"})
+        assert mr.status_code in (200, 201), mr.text
+        msgs = db.query("SELECT id FROM messages WHERE workspace_id=?", (wid,))
+        assert msgs, "删域前应有操作记录，否则本用例失去意义"
+    finally:
+        assert client.delete(f"/workspaces/{wid}", headers=auth_headers).status_code in (200, 204)
+
+    assert db.query("SELECT id FROM requirements WHERE workspace_id=?", (wid,)) == [], \
+        "需求未随业务域级联清理"
+    assert db.query("SELECT id FROM messages WHERE workspace_id=?", (wid,)) == [], \
+        "操作记录未随业务域级联清理"

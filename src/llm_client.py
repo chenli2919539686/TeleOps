@@ -111,9 +111,24 @@ class LLMClient:
         # 无标记：通用文本
         return "（离线 Mock 模式下未触发具体任务，返回占位文本）"
 
+    @staticmethod
+    def _alert_part_of(prompt: str) -> str:
+        """从 ROOTCAUSE prompt 中截出「告警」正文，剔除上下文段落。
+
+        上下文（知识库命中 / 拓扑依赖）里可能混入其它场景的关键词——例如用
+        「核心温度过热」检索时命中了光模块 SOP，prompt 里就会出现 "optical"。
+        若把上下文一并参与场景匹配，诊断结果会随知识库加载顺序漂移：
+        Path.glob() 在 Windows 与 Linux 上返回顺序不同，导致同一份代码
+        本地返回 temperature_probe、CI 却返回 optical_power_probe。
+        """
+        m = re.search(r"告警:\s*(.*?)\s*\n上下文:", prompt, re.S)
+        return m.group(1) if m else prompt
+
     def _mock_rootcause(self, p: str) -> str:
         # 场景化：光模块/optical/onu 触发“缺工具”闭环；否则给通用拓扑根因
-        if any(k in p for k in ["光模块", "optical", "onu", "optical_power"]):
+        # 只认告警本体（见 _alert_part_of），保证离线 Mock 结果跨平台确定。
+        scope = self._alert_part_of(p)
+        if any(k in scope for k in ["光模块", "optical", "onu", "optical_power"]):
             return json.dumps({
                 "hypotheses": [
                     {
@@ -126,7 +141,7 @@ class LLMClient:
                 ],
                 "conclusion": "建议优先排查光链路，并补充光功率探测工具以定位"
             }, ensure_ascii=False)
-        if any(k in p for k in ["温度", "过热", "temperature", "散热"]):
+        if any(k in scope for k in ["温度", "过热", "temperature", "散热"]):
             return json.dumps({
                 "hypotheses": [
                     {
