@@ -1,0 +1,20 @@
+# TeleOps Caddy 反向代理 + 自动 HTTPS
+# - 域名来自环境变量 {env.TELEOPS_DOMAIN}（compose 注入）
+# - localhost 时 Caddy 用内部 CA 自签（本地自测，浏览器需信任该 CA 或直接忽略警告）
+# - 真实域名时自动向 Let's Encrypt 申请/续期证书
+# - backend 单端口同时提供 API 与静态界面，全部反代到 backend:8000
+
+{
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+{env.TELEOPS_DOMAIN} {
+    encode gzip
+
+    # 流式输出（diagnose/build 的 markdown 流式）实时刷新，不缓冲
+    reverse_proxy backend:8000 {
+        flush_interval -1
+    }
+}

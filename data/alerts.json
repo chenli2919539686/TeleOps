@@ -1,0 +1,884 @@
+{
+  "alerts": [
+    {
+      "ts": "2005T06-03-15",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R02-M1-N0-C:J12-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "instruction cache parity error corrected",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9001"
+    },
+    {
+      "ts": "2005T06-03-15",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R02-M1-N0-C:J12-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "instruction cache parity error corrected",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9002"
+    },
+    {
+      "ts": "2005T06-03-15",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R02-M1-N0-C:J12-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "instruction cache parity error corrected",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9003"
+    },
+    {
+      "ts": "2005T06-03-15",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R02-M1-N0-C:J12-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "instruction cache parity error corrected",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9004"
+    },
+    {
+      "ts": "2005T06-03-16",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R23-M0-NE-C:J05-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "63543 double-hummer alignment exceptions",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9005"
+    },
+    {
+      "ts": "2005T06-03-16",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R24-M0-N1-C:J13-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "162 double-hummer alignment exceptions",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9006"
+    },
+    {
+      "ts": "2005T06-03-16",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R21-M1-N6-C:J08-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "141 double-hummer alignment exceptions",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9007"
+    },
+    {
+      "ts": "2005T06-03-18",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R16-M1-N2-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "CE sym 2, at 0x0b85eee0, mask 0x05",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9008"
+    },
+    {
+      "ts": "2005T06-04-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_app_fatal",
+      "host": "R04-M1-N4-I:J18-U11",
+      "severity": "critical",
+      "value": "FATAL",
+      "message": "ciod: failed to read message prefix on control stream (CioStream socket to 172.16.96.116:33569",
+      "tags": [
+        "bgl",
+        "ras",
+        "app"
+      ],
+      "is_noise": false,
+      "alert_id": "A-9009"
+    },
+    {
+      "ts": "2005T06-04-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_app_fatal",
+      "host": "R27-M1-N4-I:J18-U01",
+      "severity": "critical",
+      "value": "FATAL",
+      "message": "ciod: failed to read message prefix on control stream (CioStream socket to 172.16.96.116:33370",
+      "tags": [
+        "bgl",
+        "ras",
+        "app"
+      ],
+      "is_noise": false,
+      "alert_id": "A-9010"
+    },
+    {
+      "ts": "2005T06-04-20",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R30-M0-N7-C:J08-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "CE sym 20, at 0x1438f9e0, mask 0x40",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9011"
+    },
+    {
+      "ts": "2005T06-05-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R25-M0-N7-C:J02-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.2275",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9012"
+    },
+    {
+      "ts": "2005T06-05-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R24-M1-N8-C:J09-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.862",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9013"
+    },
+    {
+      "ts": "2005T06-05-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R24-M1-NB-C:J15-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.728",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9014"
+    },
+    {
+      "ts": "2005T06-05-00",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R20-M1-N8-C:J04-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.775",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9015"
+    },
+    {
+      "ts": "2005T06-05-01",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R24-M0-NE-C:J14-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.3276",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9016"
+    },
+    {
+      "ts": "2005T06-05-01",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R21-M1-N2-C:J11-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1717",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9017"
+    },
+    {
+      "ts": "2005T06-05-01",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R24-M0-N8-C:J04-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.3919",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9018"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R31-M0-NE-C:J05-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.2079",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9019"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R36-M0-NA-C:J06-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1414",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9020"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R33-M0-N4-C:J02-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.3055",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9021"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R22-M0-ND-C:J10-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.201",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9022"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R27-M0-N6-C:J10-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1125",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9023"
+    },
+    {
+      "ts": "2005T06-05-05",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R26-M1-N8-C:J17-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.412",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9024"
+    },
+    {
+      "ts": "2005T06-05-06",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R36-M1-N8-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.7828",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9025"
+    },
+    {
+      "ts": "2005T06-05-06",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R33-M1-NB-C:J06-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.5570",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9026"
+    },
+    {
+      "ts": "2005T06-05-06",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R01-M1-N7-C:J04-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.8275",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9027"
+    },
+    {
+      "ts": "2005T06-05-07",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R35-M1-NE-C:J05-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4183",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9028"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R36-M1-NF-C:J11-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6545",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9029"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R37-M1-NE-C:J13-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4245",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9030"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R32-M1-N4-C:J16-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6884",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9031"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R30-M1-N3-C:J02-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.201",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9032"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_fatal",
+      "host": "R30-M1-N3-C:J02-U01",
+      "severity": "critical",
+      "value": "FATAL",
+      "message": "force load/store alignment...............0",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": false,
+      "alert_id": "A-9033"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R34-M1-NE-C:J02-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6471",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9034"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R31-M1-N7-C:J05-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4155",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9035"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R32-M0-NF-C:J10-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.449",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9036"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R34-M1-NC-C:J06-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6990",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9037"
+    },
+    {
+      "ts": "2005T06-05-08",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R31-M1-NC-C:J14-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4876",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9038"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R37-M0-N7-C:J08-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.2218",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9039"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R34-M1-NA-C:J07-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.7518",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9040"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R33-M1-N8-C:J09-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.5854",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9041"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R30-M1-N3-C:J10-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.7457",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9042"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R32-M1-N5-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6896",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9043"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R37-M0-N3-C:J14-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.3488",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9044"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R36-M0-NA-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1172",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9045"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R33-M0-N6-C:J08-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.2286",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9046"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R30-M0-ND-C:J07-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.786",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9047"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R35-M0-N5-C:J17-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.2680",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9048"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R32-M0-N2-C:J15-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1524",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9049"
+    },
+    {
+      "ts": "2005T06-05-09",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R35-M1-ND-C:J10-U11",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4937",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9050"
+    },
+    {
+      "ts": "2005T06-05-10",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R36-M1-ND-C:J13-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.6801",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9051"
+    },
+    {
+      "ts": "2005T06-05-10",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R31-M1-NF-C:J15-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.4368",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9052"
+    },
+    {
+      "ts": "2005T06-05-10",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R34-M0-ND-C:J03-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.851",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9053"
+    },
+    {
+      "ts": "2005T06-05-10",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R32-M0-N9-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1744",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9054"
+    },
+    {
+      "ts": "2005T06-05-10",
+      "source": "loghub_bgl",
+      "metric": "bgl_kernel_info",
+      "host": "R30-M0-N0-C:J17-U01",
+      "severity": "info",
+      "value": "INFO",
+      "message": "generating core.1588",
+      "tags": [
+        "bgl",
+        "ras",
+        "kernel"
+      ],
+      "is_noise": true,
+      "alert_id": "A-9055"
+    }
+  ]
+}

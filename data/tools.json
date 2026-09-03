@@ -1,0 +1,29 @@
+{
+  "tools": [
+    {
+      "name": "ping_host",
+      "description": "对指定主机执行 ping 探测连通性",
+      "params": {
+        "host": {
+          "type": "string"
+        }
+      },
+      "executor": "tools/net_ping.py",
+      "owner_agent": "dev",
+      "risk": "low"
+    },
+    {
+      "name": "restart_service",
+      "description": "重启指定服务(高危)",
+      "params": {
+        "service": {
+          "type": "string"
+        }
+      },
+      "executor": "tools/svc_restart.py",
+      "owner_agent": "dev",
+      "risk": "high",
+      "require_human_approval": true
+    }
+  ]
+}

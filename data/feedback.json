@@ -1,0 +1,20 @@
+{
+  "feedbacks": [
+    {
+      "feedback_id": "F-001",
+      "from": "ops-agent",
+      "type": "new_failure_pattern",
+      "summary": "出现新型告警:光模块发光功率异常(onu-1),现有工具库无对应探测工具,需研发补充 optical_power 探测工具",
+      "assigned_to": "dev-agent",
+      "status": "todo"
+    },
+    {
+      "feedback_id": "F-002",
+      "from": "ops-agent",
+      "type": "knowledge_gap",
+      "summary": "核心交换机端口拥塞引发级联,处置 SOP 缺失,需补充网络拥塞应急手册",
+      "assigned_to": "dev-agent",
+      "status": "todo"
+    }
+  ]
+}

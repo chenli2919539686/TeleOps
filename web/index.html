@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TeleOps · 智能体平台</title>
+  <link rel="icon" href="logo.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="styles.css?v=0.7.5" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- 鉴权提示横幅（服务端启用 Token 且本地未填时显示） -->
+    <div id="authBanner" class="auth-banner" style="display:none">
+      <span>🔒 服务端已启用 Token 鉴权，写操作需先在「设置」中填入 API Token。</span>
+      <button class="ghost-btn sm" onclick="document.getElementById('openSettings').click()">去设置</button>
+      <button class="icon-btn" onclick="this.parentElement.style.display='none'">✕</button>
+    </div>
+
+    <!-- 业务域悬浮卡（hover 顶部 tab 显示） -->
+    <div id="wsHover" class="ws-hover"></div>
+
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo"><svg width="42" height="42" viewBox="0 0 42 42" xmlns="http://www.w3.org/2000/svg" aria-label="TeleOps 智能体平台 Logo"><path d="M21 5 L34 12 L34 30 L21 37 L8 30 L8 12 Z" fill="none" stroke="rgba(255,255,255,0.35)" stroke-width="1.2" stroke-linejoin="round"/><circle cx="21" cy="21" r="6.5" fill="#ffffff"/><circle cx="21" cy="11" r="2.2" fill="#22d3ee"/><circle cx="31" cy="28" r="2.2" fill="#22d3ee"/><circle cx="11" cy="28" r="2.2" fill="#22d3ee"/><path d="M21 21 L21 11 M21 21 L31 28 M21 21 L11 28" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round"/><path d="M27 8 Q35 11 35 20" fill="none" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" opacity="0.9"/><path d="M30 5 Q40 9 40 21" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" opacity="0.55"/></svg></div>
+        <div class="brand-text">
+          <div class="brand-name">TeleOps</div>
+          <div class="brand-sub">智能体平台</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="overview"><span class="nav-ico">🎛️</span>Agent 作战室</button>
+        <div class="nav-sep"></div>
+        <button class="nav-item" data-view="loop"><span class="nav-ico">🔄</span>闭环看板</button>
+        <button class="nav-item" data-view="board"><span class="nav-ico">📥</span>消息栏</button>
+        <button class="nav-item" data-view="integ"><span class="nav-ico">🔌</span>接入层</button>
+        <div class="nav-sep"></div>
+        <button class="nav-item" data-view="topo"><span class="nav-ico">🕸️</span>拓扑视图</button>
+        <button class="nav-item" data-view="tools"><span class="nav-ico">📦</span>工具库</button>
+        <button class="nav-item" data-view="kb"><span class="nav-ico">📚</span>知识库</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="status-row">
+          <span class="dot" id="connDot"></span>
+          <span id="connText">连接中…</span>
+        </div>
+        <div class="mode-badge" id="modeBadge">—</div>
+        <button class="ghost-btn" id="themeBtn">🌓 主题</button>
+      </div>
+    </aside>
+
+    <!-- 主区 -->
+    <main class="main">
+      <!-- 顶部：业务域标签 + 模式 + 设置 + 消息抽屉 -->
+      <header class="topbar">
+        <div class="ws-tabs" id="wsTabs">
+          <span class="empty-sm">加载业务域…</span>
+        </div>
+        <div class="topbar-right">
+          <!-- 登录区：未登录显示「登录」按钮，已登录显示用户徽标+登出 -->
+          <span id="authArea"></span>
+          <div class="mode-switch" id="wsModeSwitch">
+            <span class="mode-label">派发</span>
+            <button class="mode-btn active" data-mode="auto" id="wsModeAuto">⚡ 自动</button>
+            <button class="mode-btn" data-mode="manual" id="wsModeManual">✋ 手动</button>
+          </div>
+          <button class="ghost-btn" id="openSettings">⚙️ 设置</button>
+          <button class="ghost-btn" id="toggleDrawer">📥 消息栏</button>
+        </div>
+      </header>
+
+      <!-- Agent 作战室（默认首页） -->
+      <section class="view active" id="view-overview">
+        <header class="view-head">
+          <h1>Agent 作战室 · <span id="ovWsName">—</span>
+            <button class="ghost-btn danger" id="wsDelete" title="删除当前业务域（默认域受保护）">🗑 删除业务域</button>
+          </h1>
+          <p>研发层在上、运维层在下，虚线表示「派单 / 工具交付」链路：运维缺工具 → 需求沿虚线下发研发 → 工具造好后沿虚线回传。点卡片上的 ✎ 可改名 / 编辑；顶部业务域标签切换不同接入域；右侧消息栏实时查看需求流转。</p>
+        </header>
+
+        <div class="warroom">
+          <div class="layer">
+            <div class="layer-label"><span class="layer-ico">🛠️</span> 研发 Agent（造工具）</div>
+            <div class="agent-row" id="warDev"></div>
+          </div>
+
+          <svg class="war-conn" viewBox="0 0 600 90" preserveAspectRatio="none">
+            <path d="M120 0 Q120 45 120 90" />
+            <path d="M300 0 Q300 45 300 90" />
+            <path d="M480 0 Q480 45 480 90" />
+          </svg>
+
+          <div class="layer">
+            <div class="layer-label"><span class="layer-ico">🛰️</span> 运维 Agent（处置告警）</div>
+            <div class="agent-row" id="warOps"></div>
+          </div>
+        </div>
+
+        <div class="war-loop" id="warLoop">
+          <div class="war-loop-head">
+            <span class="layer-ico">🔁</span> 当前闭环
+            <span class="war-loop-sub">本业务域最近的需求流转</span>
+          </div>
+          <div class="war-loop-body" id="warLoopBody">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 闭环看板 -->
+      <section class="view" id="view-loop">
+        <header class="view-head">
+          <h1>闭环看板 · 运维↔研发</h1>
+          <p>一条告警触发完整纵向闭环：运维发现缺工具 → 研发造工具并注册 → 运维复用新工具。</p>
+        </header>
+        <div class="loop-controls">
+          <button class="primary-btn" id="loopRun">▶ 运行完整闭环</button>
+          <button class="ghost-btn" id="loopReset">↺ 重置演示数据</button>
+        </div>
+        <div class="pipeline" id="pipeline"></div>
+        <div class="loop-result" id="loopResult"></div>
+      </section>
+
+      <!-- 消息栏 / 需求看板 -->
+      <section class="view" id="view-board">
+        <header class="view-head">
+          <h1>消息栏 · 需求看板</h1>
+          <p>运维 Agent 缺工具时在此登记需求；可切「自动」让系统自动派发研发造工具并回填，或切「手动」由你逐步派发给指定 Agent 形成闭环。</p>
+        </header>
+
+        <div class="board-toolbar">
+          <div class="mode-switch">
+            <span class="mode-label">派发模式</span>
+            <button class="mode-btn active" data-mode="auto" id="modeAuto">⚡ 自动</button>
+            <button class="mode-btn" data-mode="manual" id="modeManual">✋ 手动</button>
+          </div>
+          <button class="ghost-btn" id="boardRefresh">↻ 刷新</button>
+        </div>
+
+        <div class="board-cols">
+          <div class="board-main">
+            <div class="raise-box">
+              <span>发起需求（来源运维 Agent）：</span>
+              <select id="raiseOps"></select>
+              <button class="primary-btn" id="raiseBtn">＋ 发起需求</button>
+              <span class="hint" id="raiseHint"></span>
+            </div>
+            <div class="req-list" id="reqList">
+              <div class="empty">暂无需求，点上方「发起需求」试试。</div>
+            </div>
+          </div>
+          <aside class="board-side">
+            <h3>运维 Agent 矩阵</h3>
+            <div class="agent-group" id="agentOps"></div>
+            <h3>研发 Agent 矩阵</h3>
+            <div class="agent-group" id="agentDev"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- 接入层 / 适配器 -->
+      <section class="view" id="view-integ">
+        <header class="view-head">
+          <h1>接入层 · 外部系统适配器</h1>
+          <p>TeleOps 不直接替换现有运维系统，而是通过「适配器」把外部数据（告警/日志/CMDB/工单/知识）接进内核统一 Schema，并把 Agent 的决策经执行适配器下发到设备。以下接口已设计预留，样板可真实运行。</p>
+        </header>
+
+        <div class="integ-stats" id="integStats"></div>
+
+        <div class="integ-grid" id="adapterGrid"></div>
+
+        <div class="integ-test card">
+          <h3>🧪 告警接入测试（Prometheus 样板）</h3>
+          <p class="muted">点「发送样例告警」会把一段 Alertmanager 标准 webhook 经 <code>alert-prometheus</code> 适配器解析为统一告警，并直接喂给运维 Agent 做根因分析。</p>
+          <pre class="code-box" id="samplePayload">{
+  "alerts": [{
+    "labels": {"alertname": "HostHighTemp", "instance": "host-1:9100",
+               "job": "node", "severity": "critical"},
+    "annotations": {"description": "核心温度 88C 过热", "value": "88C"},
+    "startsAt": "2026-09-01T10:00:00Z"
+  }]
+}</pre>
+          <div class="composer-actions">
+            <button class="primary-btn" id="ingestRun">📨 发送样例告警</button>
+            <button class="ghost-btn" id="ingestJson">查看原始 JSON 映射</button>
+          </div>
+          <div class="kb-result" id="ingestResult"></div>
+        </div>
+      </section>
+
+      <!-- 拓扑 -->
+      <section class="view" id="view-topo">
+        <header class="view-head">
+          <h1>CMDB 拓扑</h1>
+          <p>云网资源依赖关系图（来自 topology.json）。</p>
+        </header>
+        <div class="topo-wrap"><svg id="topoSvg" viewBox="0 0 800 520"></svg></div>
+      </section>
+
+      <!-- 工具库 -->
+      <section class="view" id="view-tools">
+        <header class="view-head">
+          <h1>工具库</h1>
+          <p>研发 Agent 注册的可被运维 Agent 调用的工具清单。</p>
+        </header>
+        <div class="card-grid" id="toolsGrid"></div>
+      </section>
+
+      <!-- 知识库 -->
+      <section class="view" id="view-kb">
+        <header class="view-head">
+          <h1>知识库检索</h1>
+          <p>基于公开数据集（MITRE ATT&CK / SRE）的 RAG 检索。</p>
+        </header>
+        <div class="composer">
+          <input id="kbQuery" type="text" placeholder="输入问题，例如：光模块告警常见根因？" />
+          <div class="composer-actions">
+            <button class="primary-btn" id="kbRun">🔍 检索</button>
+          </div>
+        </div>
+        <div class="kb-result" id="kbResult"></div>
+      </section>
+    </main>
+
+    <!-- 右侧消息抽屉 -->
+    <aside class="msg-drawer" id="msgDrawer">
+      <div class="drawer-head">
+        <span>📥 消息栏 <span id="drawerWs" class="drawer-ws"></span></span>
+        <button class="icon-btn" id="drawerClose">✕</button>
+      </div>
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-tab="req">需求流转</button>
+        <button class="drawer-tab" data-tab="log">操作记录</button>
+      </div>
+      <div class="drawer-body" id="drawerReqs"></div>
+      <div class="drawer-body" id="drawerLog" style="display:none"></div>
+    </aside>
+
+    <!-- 右侧 Agent 工作台抽屉（点击作战室卡片进入） -->
+    <aside class="wb-drawer" id="wbDrawer">
+      <div class="wb-dragbar" id="wbDragbar" title="拖拽调整宽度"></div>
+      <div class="wb-head">
+        <div class="wb-title"><span id="wbKindIco">🛰️</span> <span id="wbName">—</span></div>
+        <div class="wb-sub">
+          <span class="status-dot idle" id="wbDot"></span>
+          <span id="wbId" class="wb-id">—</span>
+          <span id="wbKindLabel" class="wb-kind">—</span>
+        </div>
+        <button class="icon-btn" id="wbClose" title="关闭工作台">✕</button>
+      </div>
+      <div class="wb-body" id="wbBody">
+        <div class="empty">点击左侧作战室 Agent 卡片打开工作台</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 模态：创建 Agent -->
+  <div class="modal-mask" id="agentModal">
+    <div class="modal">
+      <div class="modal-head"><span id="agentModalTitle">创建 Agent</span><button class="icon-btn" data-close="agentModal">✕</button></div>
+      <div class="modal-body">
+        <label>类型</label>
+        <div class="seg" id="agentKind">
+          <button type="button" class="seg-btn active" data-kind="ops">🛰️ 运维 Agent</button>
+          <button type="button" class="seg-btn" data-kind="dev">🛠️ 研发 Agent</button>
+        </div>
+        <label>名称（可自定义）</label>
+        <input id="agentName" type="text" placeholder="如：光模块运维 Agent" />
+        <label>擅长领域（逗号分隔）</label>
+        <input id="agentScope" type="text" placeholder="optical, onu, access" />
+        <label>描述</label>
+        <textarea id="agentDesc" rows="2" placeholder="该 Agent 负责的范围"></textarea>
+        <label class="chk"><input type="checkbox" id="agentPrimary" /> 设为主 Agent（优先派发）</label>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost-btn" data-close="agentModal">取消</button>
+        <button class="primary-btn" id="agentSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态：创建业务域 -->
+  <div class="modal-mask" id="wsModal">
+    <div class="modal">
+      <div class="modal-head"><span>接入接口 · 新建业务域</span><button class="icon-btn" data-close="wsModal">✕</button></div>
+      <div class="modal-body">
+        <label>业务域名称（接入一个接口即命名一个）</label>
+        <input id="wsName" type="text" placeholder="如：接入网运维域" />
+        <label>关联北向接入（适配器）</label>
+        <select id="wsAdapter"></select>
+        <label>默认派发模式</label>
+        <div class="seg" id="wsMode">
+          <button type="button" class="seg-btn active" data-mode="auto">⚡ 自动</button>
+          <button type="button" class="seg-btn" data-mode="manual">✋ 手动</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost-btn" data-close="wsModal">取消</button>
+        <button class="primary-btn" id="wsSave">创建业务域</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态：登录 / 注册（JWT） -->
+  <div class="modal-mask" id="loginModal">
+    <div class="modal modal-sm">
+      <div class="modal-head"><span id="loginTitle">🔐 登录</span><button class="icon-btn" data-close="loginModal">✕</button></div>
+      <div class="modal-body">
+        <div class="seg" id="loginTabs">
+          <button type="button" class="seg-btn active" data-tab="login">登录</button>
+          <button type="button" class="seg-btn" data-tab="register">注册</button>
+        </div>
+        <label>用户名</label>
+        <input id="loginUser" type="text" placeholder="用户名" autocomplete="username" />
+        <label>密码</label>
+        <input id="loginPass" type="password" placeholder="密码（注册需 ≥8 位）" autocomplete="current-password" />
+        <div class="hint" id="loginMsg"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost-btn" id="loginGuest">🚶 访客浏览</button>
+        <button class="primary-btn" id="loginSubmit">登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态：设置 -->
+  <div class="modal-mask" id="settingsModal">
+    <div class="modal">
+      <div class="modal-head"><span>⚙️ 设置</span><button class="icon-btn" data-close="settingsModal">✕</button></div>
+      <div class="modal-body">
+        <div class="set-row">
+          <span>界面主题</span>
+          <button class="ghost-btn" id="setTheme">🌓 切换浅色 / 深色</button>
+        </div>
+        <div class="set-row">
+          <span>当前业务域派发模式</span>
+          <div class="seg" id="setMode">
+            <button type="button" class="seg-btn" data-mode="auto">⚡ 自动</button>
+            <button type="button" class="seg-btn" data-mode="manual">✋ 手动</button>
+          </div>
+        </div>
+        <div class="set-row" style="flex-direction:column;align-items:stretch;gap:8px">
+          <span>API Token（服务端启用 <code>TELEOPS_API_TOKEN</code> 鉴权时填写，留空表示未启用）</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="setToken" type="password" placeholder="与服务端 TELEOPS_API_TOKEN 一致" style="flex:1" />
+            <button class="primary-btn sm" id="setTokenSave">保存</button>
+          </div>
+        </div>
+        <div class="set-row">
+          <span>闭环演示数据</span>
+          <button class="ghost-btn" id="setReset">↺ 重置</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:8px">每个业务域独立配置 Agent 与派发模式；数据持久化于 SQLite（<code>data/teleops.db</code>），重启不丢。写操作通过账号登录（JWT）或 API Token 鉴权。</p>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost-btn" data-close="settingsModal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js?v=0.7.5"></script>
+</body>
+</html>

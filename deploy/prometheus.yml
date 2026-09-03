@@ -1,0 +1,14 @@
+# TeleOps Prometheus 抓取配置（可观测性 profile）
+# 用法：docker compose -f deploy/docker-compose.yml --profile observability up -d
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # TeleOps /metrics 端点（Prometheus 文本格式，公开、零依赖）
+  - job_name: teleops
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8000"]
+        labels:
+          service: teleops

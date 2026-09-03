@@ -1,0 +1,61 @@
+{
+  "workspaces": [
+    {
+      "id": "core-net",
+      "name": "核心网运维域",
+      "adapter_id": "alert-prometheus",
+      "mode": "auto",
+      "agents": [
+        {
+          "id": "core-net-ops-main",
+          "name": "核心网运维 Agent",
+          "kind": "ops",
+          "scope": [
+            "core",
+            "compute"
+          ],
+          "description": "负责核心网 / 算力设备告警处置",
+          "primary": true,
+          "status": "idle"
+        },
+        {
+          "id": "core-net-ops-2",
+          "name": "接入网运维 Agent",
+          "kind": "ops",
+          "scope": [
+            "access",
+            "optical",
+            "onu"
+          ],
+          "description": "负责接入网 / 光模块 / ONU 告警处置",
+          "primary": false,
+          "status": "idle"
+        },
+        {
+          "id": "core-net-dev-main",
+          "name": "网络工具研发 Agent",
+          "kind": "dev",
+          "scope": [
+            "net",
+            "optical"
+          ],
+          "description": "负责网络 / 光层探测工具研发",
+          "primary": true,
+          "status": "idle"
+        },
+        {
+          "id": "core-net-dev-2",
+          "name": "通用工具研发 Agent",
+          "kind": "dev",
+          "scope": [
+            "compute",
+            "generic"
+          ],
+          "description": "负责算力 / 通用运维工具研发",
+          "primary": false,
+          "status": "idle"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+# 开发 / 测试 / CI 专用依赖（与运行时依赖分离）
+# 安装：pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0

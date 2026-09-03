@@ -1,0 +1,13 @@
+# TeleOps 后端精简依赖（仅 FastAPI 真正需要的）
+# 已剔除根 requirements.txt 里的 gradio / chromadb / pandas / httpx / pyyaml
+# （gradio 仅旧 Gradio 原型用；chromadb 仅在 USE_CHROMA=1 时按需加载；其余未使用）
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0
+python-dotenv>=1.0
+openai>=1.0
+langgraph>=0.2
+networkx>=3.0
+
+# 可选：向量检索（知识库 RAG）。如需启用，取消注释并在 compose 中设 USE_CHROMA=1
+# chromadb>=0.5

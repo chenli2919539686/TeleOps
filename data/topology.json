@@ -1,0 +1,118 @@
+{
+  "nodes": [
+    {
+      "id": "svc-order",
+      "type": "service",
+      "name": "订单服务",
+      "domain": "B域"
+    },
+    {
+      "id": "svc-billing",
+      "type": "service",
+      "name": "计费服务",
+      "domain": "B域"
+    },
+    {
+      "id": "db-order",
+      "type": "database",
+      "name": "订单库"
+    },
+    {
+      "id": "db-billing",
+      "type": "database",
+      "name": "计费库"
+    },
+    {
+      "id": "mq-1",
+      "type": "middleware",
+      "name": "RabbitMQ"
+    },
+    {
+      "id": "sw-core",
+      "type": "network",
+      "name": "核心交换机"
+    },
+    {
+      "id": "sw-access",
+      "type": "network",
+      "name": "接入交换机"
+    },
+    {
+      "id": "host-1",
+      "type": "host",
+      "name": "物理机A"
+    },
+    {
+      "id": "host-2",
+      "type": "host",
+      "name": "物理机B"
+    },
+    {
+      "id": "olt-1",
+      "type": "network",
+      "name": "OLT设备"
+    },
+    {
+      "id": "onu-1",
+      "type": "network",
+      "name": "ONU终端"
+    }
+  ],
+  "edges": [
+    {
+      "from": "svc-order",
+      "to": "db-order",
+      "rel": "读写"
+    },
+    {
+      "from": "svc-order",
+      "to": "mq-1",
+      "rel": "依赖"
+    },
+    {
+      "from": "svc-billing",
+      "to": "db-billing",
+      "rel": "读写"
+    },
+    {
+      "from": "svc-billing",
+      "to": "mq-1",
+      "rel": "依赖"
+    },
+    {
+      "from": "host-1",
+      "to": "sw-access",
+      "rel": "上联"
+    },
+    {
+      "from": "host-2",
+      "to": "sw-access",
+      "rel": "上联"
+    },
+    {
+      "from": "sw-access",
+      "to": "sw-core",
+      "rel": "上联"
+    },
+    {
+      "from": "db-order",
+      "to": "host-1",
+      "rel": "部署于"
+    },
+    {
+      "from": "db-billing",
+      "to": "host-2",
+      "rel": "部署于"
+    },
+    {
+      "from": "olt-1",
+      "to": "sw-core",
+      "rel": "上联"
+    },
+    {
+      "from": "onu-1",
+      "to": "olt-1",
+      "rel": "上联"
+    }
+  ]
+}
