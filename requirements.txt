@@ -1,4 +1,6 @@
-langgraph>=0.2
+# 上限必须锁 0.3：langgraph 1.x 重构了 langgraph.graph 的导出与 StateGraph 语义，
+# 本项目代码基于 0.2.x API，装到 1.x 会直接 import 失败
+langgraph>=0.2,<0.3
 chromadb>=0.5
 gradio>=5.0
 networkx>=3.0
