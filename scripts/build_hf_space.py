@@ -85,7 +85,9 @@ pydantic>=2.0
 openai>=1.0
 python-dotenv>=1.0
 httpx>=0.27
-langgraph>=0.2
+# 上限必须锁 0.3：langgraph 1.x 重构了 langgraph.graph 导出与 StateGraph 语义，
+# 本项目基于 0.2.x API，装到 1.x 会直接 import 失败（CI / Spaces 部署会挂）
+langgraph>=0.2,<0.3
 """
 
 ENV_EXAMPLE = """# 在 HF Space → Settings → Secrets 中设置；本地可复制为 .env
