@@ -18,6 +18,12 @@
 
 两者经「故障反馈」闭环联动，对应运营商「业务运维一体化」。
 
+## 架构概览
+
+![TeleOps 架构](docs/architecture.svg)
+
+> **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 8 视图经 FastAPI 同源托管，多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
+
 ## 目录结构
 ```
 TeleOps/
@@ -28,6 +34,7 @@ TeleOps/
 ├── pytest.ini                # pytest 配置
 ├── .env.example
 ├── .dockerignore             # 构建镜像时排除 .env / .git / 缓存 / 虚拟环境
+├── docs/                     # 文档素材（架构图 architecture.svg 等）
 ├── data/                     # 数据层：topology/tools/feedback=自造；alerts=公开日志转换
 │   └── raw/                  # 公开日志原始样本（hdfs_sample.log / bgl_sample.log）
 ├── kb/                       # 知识库 markdown（来自 MITRE ATT&CK / SRE 公开知识）
