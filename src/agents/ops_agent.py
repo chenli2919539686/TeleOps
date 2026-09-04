@@ -107,11 +107,18 @@ class OpsAgent:
 
     def rootcause(self, alert: dict) -> dict:
         ctx = self._build_context(alert)
+        existing = self.tools.list_tools()
+        tools_hint = ""
+        if existing:
+            tools_hint = (
+                "\n\n当前工具库已有工具（优先复用已有名字，只有确实没有合适工具时才推荐新名字）: "
+                + ", ".join(existing)
+            )
         prompt = (
             "[TASK:ROOTCAUSE]\n"
             f"你是电信云网运维专家。基于以下上下文，对告警做根因推理，"
             f"输出 JSON：{{hypotheses:[{{cause,confidence,evidence,recommended_tool,recommended_action}}],conclusion}}。\n\n"
-            f"告警: {json.dumps(alert, ensure_ascii=False)}\n上下文:\n{ctx}"
+            f"告警: {json.dumps(alert, ensure_ascii=False)}\n上下文:\n{ctx}{tools_hint}"
         )
         raw = self.llm.complete(prompt)
         data = extract_json(raw)
@@ -150,6 +157,22 @@ class OpsAgent:
                 return t
         return ""
 
+    def _normalize_tool_names(self, diagnosis: dict) -> dict:
+        """把 LLM 推荐的工具名归一化到已有工具，避免重复造轮子。
+
+        先精确匹配；精确匹配失败时按名字/描述相似度回退到已有工具。
+        归一化会直接改写 hypothesis 中的 recommended_tool。
+        """
+        for h in diagnosis.get("hypotheses", []):
+            t = h.get("recommended_tool")
+            if not t or t in self.tools.list_tools():
+                continue
+            similar = self.tools.find_similar_tool(
+                t, h.get("recommended_action", ""))
+            if similar:
+                h["recommended_tool"] = similar
+        return diagnosis
+
     # ---------- 4. 汇总处置建议 ----------
     def build_plan(self, diagnosis: dict, tool_results: list) -> dict:
         actions = []
@@ -170,6 +193,7 @@ class OpsAgent:
             return {"alert": alert, "normalized": norm, "is_noise": True,
                     "diagnosis": {}, "tool_results": [], "plan": {"actions": ["噪声告警，已抑制"]}}
         diag = self.rootcause(alert)
+        diag = self._normalize_tool_names(diag)
         tr = self.run_recommended_tools(diag)
         missing = self.detect_missing_tool(diag)
         plan = self.build_plan(diag, tr)
@@ -183,6 +207,7 @@ class OpsAgent:
         降噪 + 根因推理是纯浪费（两次 LLM 调用）。此处直接用新工具
         重新执行诊断建议的探测，验证闭环生效。
         """
+        diagnosis = self._normalize_tool_names(diagnosis)
         tr = self.run_recommended_tools(diagnosis)
         missing = self.detect_missing_tool(diagnosis)
         plan = self.build_plan(diagnosis, tr)

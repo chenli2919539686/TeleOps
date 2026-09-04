@@ -209,6 +209,12 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.3 · 修复 LLM 工具名漂移导致的重复造工具**
+- **问题**：真实 DeepSeek 调用下，OpsAgent 让 LLM 自由推荐 `recommended_tool`，同一光功率/温度问题每次返回不同名字（`optical_power_probe`、`display_transceiver_diagnosis`、`olt_onu_optical_probe`…），`detect_missing_tool` 只做精确字符串匹配，导致 55 条样本循环几轮造出 20+ 功能重复的工具，复用沉淀统计失真。
+- **Prompt 注入已有工具列表**：`OpsAgent.rootcause` 在根因 prompt 末尾追加「当前工具库已有工具：… 优先复用已有名字，只有确实没有合适工具时才推荐新名字」，从源头约束 LLM 命名。
+- **相似度归一化兜底**：`ToolRegistry.find_similar_tool` 用 `difflib.SequenceMatcher` 对工具名和推荐动作做相似度匹配；`OpsAgent._normalize_tool_names` 在 `handle_alert` / `redrive` 中先对诊断假设做归一化，把漂移名字映射回已有工具，避免重复登记需求。
+- 新增 `scripts/test_tool_dedup.py` 诊断脚本，验证常见漂移别名能正确归一；`pytest 61 项全绿`。
+
 **v0.8.2 · 闭环链路提速（真实 LLM 下首遇告警 34s → 约 10s）**
 - **造工具与写 SOP 并行**：`DevAgent.fulfill_feedback` 用线程池并发跑 CODEGEN 与 SOP 生成（SOP 工具名取派发需求中的 `needed_tool`），两次 LLM 调用从串行 28s 缩到取最大值约 14s；提示词同时要求精简输出（工具代码 30 行内、SOP 600 字内）进一步压缩生成时间。
 - **round2 复用首轮诊断**：`raise_requirement` 把完整根因诊断随需求落库；`dispatch_to_ops` 回派时新增 `OpsAgent.redrive`——跳过重复的降噪 + 根因推理（约 7s），只重跑工具执行验证复用生效；旧需求无诊断时自动回退完整 `handle_alert`。

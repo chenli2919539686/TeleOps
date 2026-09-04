@@ -10,6 +10,7 @@ v0.7.2 修复：历史上 __init__ 把工具列表缓存在内存，研发 Agent
 """
 import sys
 import importlib.util
+import difflib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +41,38 @@ class ToolRegistry:
     def get(self, name):
         rows = db.query(f"SELECT {self._COLS} FROM tools WHERE name=?", (name,))
         return self._row_to_tool(rows[0]) if rows else None
+
+    def list_all(self):
+        """返回全部工具元数据（含描述），供相似度匹配使用。"""
+        rows = db.query(f"SELECT {self._COLS} FROM tools ORDER BY name")
+        return [self._row_to_tool(r) for r in rows]
+
+    def find_similar_tool(self, name: str, description: str = "",
+                          name_threshold: float = 0.65,
+                          desc_threshold: float = 0.45) -> str:
+        """按名字/描述相似度把 LLM 推荐的工具名归一化到已有工具。
+
+        LLM 对同一类故障容易给出不同名字（如 optical_power_probe /
+        display_transceiver_diagnosis），精确匹配会误判为缺工具，导致
+        重复造轮子。这里用 difflib 做轻量回退，命中则返回已有工具名。
+        """
+        if not name:
+            return ""
+        best_score = 0.0
+        best_name = ""
+        candidates = self.list_all()
+        for t in candidates:
+            score = difflib.SequenceMatcher(None, name, t["name"]).ratio()
+            if description:
+                desc_score = difflib.SequenceMatcher(
+                    None, description, t.get("description", "")).ratio()
+                score = max(score, desc_score)
+            if score > best_score:
+                best_score = score
+                best_name = t["name"]
+        if best_score >= name_threshold:
+            return best_name
+        return ""
 
     def requires_approval(self, name):
         t = self.get(name)
