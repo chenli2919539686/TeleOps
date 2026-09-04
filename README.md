@@ -24,6 +24,22 @@
 
 > **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 8 视图经 FastAPI 同源托管，多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
 
+## 界面演示
+
+以下截图均由本地后端（`127.0.0.1:8000`）真实渲染，通过 `scripts/capture_shots.js`（playwright-core + 系统 Edge）自动捕获，可直接用于面试/答辩演示。
+
+| Agent 作战室 | 闭环看板 |
+|---|---|
+| ![作战室](docs/shots/overview.png) | ![闭环看板](docs/shots/loop.png) |
+| **消息栏需求看板** | **接入层** |
+| ![消息栏](docs/shots/board.png) | ![接入层](docs/shots/integ.png) |
+| **拓扑视图** | **工具库** |
+| ![拓扑](docs/shots/topo.png) | ![工具库](docs/shots/tools.png) |
+| **知识库** | **Agent 工作台（含告警样本库）** |
+| ![知识库](docs/shots/kb.png) | ![工作台](docs/shots/workbench.png) |
+
+工作台中的 📚 **真实机群告警样本** 直接来自 `data/alerts.json`（55 条 BlueGene/L 真实事件，3 严重 / 52 噪声），点击任意条目即可填入左侧 JSON 框，一键触发根因分析；若发现工具缺口，底部会自动出现「登记并派发研发」按钮，进入一加二闭环。
+
 ## 目录结构
 ```
 TeleOps/
@@ -34,7 +50,7 @@ TeleOps/
 ├── pytest.ini                # pytest 配置
 ├── .env.example
 ├── .dockerignore             # 构建镜像时排除 .env / .git / 缓存 / 虚拟环境
-├── docs/                     # 文档素材（架构图 architecture.svg 等）
+├── docs/                     # 文档素材（架构图 architecture.svg + 界面截图 shots/，用于 README 演示）
 ├── data/                     # 数据层：topology/tools/feedback=自造；alerts=公开日志转换
 │   └── raw/                  # 公开日志原始样本（hdfs_sample.log / bgl_sample.log）
 ├── kb/                       # 知识库 markdown（来自 MITRE ATT&CK / SRE 公开知识）
@@ -72,7 +88,8 @@ TeleOps/
 │   ├── reset_demo.py         # 重置演示数据（清自动生成工具 + 清空消息栏）
 │   ├── build_hf_space.py     # 打包 HF Space 运行快照（剔除演示重依赖）
 │   ├── test_jwt_e2e.py       # JWT 端到端验证（12 项断言）
-│   └── verify_project.py     # 项目级验证（14 项）
+│   ├── verify_project.py     # 项目级验证（14 项）
+│   └── capture_shots.js      # 自动截图：后端启动后用 Edge 捕获前端 7 视图 + 工作台
 ├── tests/                    # pytest 套件（50 项；临时库 + 离线 Mock，不污染运行数据）
 │   ├── conftest.py           # 临时 DB + mock LLM + TestClient fixture
 │   ├── test_auth.py / test_workspaces.py / test_closed_loop.py

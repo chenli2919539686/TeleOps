@@ -1,0 +1,13 @@
+{
+  "name": "teleops",
+  "version": "0.7.5",
+  "description": "TeleOps 智能体平台：研发数字员工 × 运维 Agent 纵向闭环",
+  "private": true,
+  "scripts": {
+    "shots": "node scripts/capture_shots.js",
+    "shots:help": "echo '请先启动后端（uvicorn src.api.server:app --host 127.0.0.1 --port 8000），然后运行 npm run shots'"
+  },
+  "dependencies": {
+    "playwright-core": "^1.62.1"
+  }
+}

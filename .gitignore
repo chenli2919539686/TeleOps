@@ -18,3 +18,5 @@ logs/
 hf_space_build/
 # 运行期 trace 记录（调试产物，非源码）
 traces/
+# Node 依赖（前端截图脚本运行时下载）
+node_modules/
