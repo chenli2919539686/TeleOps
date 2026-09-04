@@ -25,3 +25,11 @@ traces/
 venv/
 envs/
 _ci_check/
+
+# 前端依赖与运行无关文件：避免打进运行镜像（COPY . /app 会带整个构建上下文）
+#   node_modules/：playwright-core 等前端截图依赖，运行镜像完全用不到
+#   tests/ scripts/ docs/：测试、构建脚本、文档均非运行期产物
+node_modules/
+tests/
+scripts/
+docs/

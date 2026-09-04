@@ -2,7 +2,14 @@
 
 用 `docker-compose` 把 **backend（FastAPI，单端口同时提供 API + 界面）** 与 **Caddy（自动 HTTPS 反向代理）** 编排起来，实现「公网安全访问 + 进程守护 + 密钥不入库」。
 
-> 本沙箱无 Docker，以下文件为交付物；请在你的服务器（Linux，已装 Docker Engine + Compose v2）上执行。
+> 本沙箱无 Docker，以下文件为交付物，无法在此构建/拉起；请在你的机器（Linux 服务器或 Windows + Docker Desktop）上执行。
+
+## 0. 环境前提
+
+- **Linux 服务器**：装 Docker Engine + Compose v2（`docker compose version` 显示 v2.x）。
+- **Windows 本机（你当前环境）**：装 **Docker Desktop**，安装时勾选 **WSL 2** 后端；启动后在 `Settings → Resources → WSL Integration` 开启对应发行版。若 `docker compose up` 报 WSL / 脚本执行类错误，多为 WSL 未就绪，重启 Docker Desktop 即可。
+- 镜像基础为 `python:3.11-slim`，首次构建会拉该镜像；Docker Hub 拉取慢可先 `docker pull python:3.11-slim` 预热。
+- **密钥不进镜像**：`deploy/.env` 由 `deploy/.env.example` 复制，仅存在于宿主，compose 把它作为环境变量注入容器；`.dockerignore` 已排除根 `.env`、`deploy/.env` 与 `node_modules/` 等，镜像层里没有明文密钥。
 
 ---
 
@@ -27,6 +34,8 @@ cd /path/to/TeleOps
 # 1) 准备密钥
 cp deploy/.env.example deploy/.env
 nano deploy/.env        # 填 DEEPSEEK_API_KEY 与 TELEOPS_DOMAIN
+# 若你本地根目录 .env 已填过 DeepSeek Key，直接把那串值粘到 deploy/.env 的
+# DEEPSEEK_API_KEY= 后面即可，无需重新去平台申请
 
 # 2) 启动（自动构建镜像 + 拉起 Caddy）
 docker compose -f deploy/docker-compose.yml up -d --build
