@@ -19,6 +19,7 @@ from src.config import (
     LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
     LOCAL_MODEL_ENDPOINT, LOCAL_MODEL,
 )
+from src.triage_rules import rule_triage, alert_from_prompt
 
 
 def extract_json(text):
@@ -108,6 +109,8 @@ class LLMClient:
             return self._mock_changeorder(p)
         if p.startswith("[TASK:KBQA]"):
             return self._mock_kbqa(p)
+        if p.startswith("[TASK:TRIAGE]"):
+            return self._mock_triage(p)
         # 无标记：通用文本
         return "（离线 Mock 模式下未触发具体任务，返回占位文本）"
 
@@ -123,6 +126,23 @@ class LLMClient:
         """
         m = re.search(r"告警:\s*(.*?)\s*\n上下文:", prompt, re.S)
         return m.group(1) if m else prompt
+
+    def _mock_triage(self, p: str) -> str:
+        """离线 TRIAGE：复用与线上相同的规则给出确定性结论。
+
+        走到这里说明规则层已判为「无结论」（真实场景会由 LLM 语义判定）。
+        Mock 无法真正理解语义，因此保守按「非噪声」处理——漏判比错杀安全，
+        且与 OpsAgent._llm_triage 解析失败时的兜底行为保持一致。
+        """
+        alert = alert_from_prompt(p)
+        verdict = rule_triage(alert)
+        if verdict is None:
+            verdict = False
+            reason = "规则无结论，离线模式保守判定为非噪声"
+        else:
+            reason = "规则命中"
+        return json.dumps({"is_noise": bool(verdict), "reason": reason},
+                          ensure_ascii=False)
 
     def _mock_rootcause(self, p: str) -> str:
         # 场景化：光模块/optical/onu 触发“缺工具”闭环；否则给通用拓扑根因

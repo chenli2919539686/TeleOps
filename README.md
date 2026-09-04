@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/chenli2919539686/TeleOps/actions/workflows/ci.yml/badge.svg)](https://github.com/chenli2919539686/TeleOps/actions)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-50%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
+[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > **仓库**：https://github.com/chenli2919539686/TeleOps
@@ -90,7 +90,7 @@ TeleOps/
 │   ├── test_jwt_e2e.py       # JWT 端到端验证（12 项断言）
 │   ├── verify_project.py     # 项目级验证（14 项）
 │   └── capture_shots.js      # 自动截图：后端启动后用 Edge 捕获前端 7 视图 + 工作台
-├── tests/                    # pytest 套件（50 项；临时库 + 离线 Mock，不污染运行数据）
+├── tests/                    # pytest 套件（61 项；临时库 + 离线 Mock，不污染运行数据）
 │   ├── conftest.py           # 临时 DB + mock LLM + TestClient fixture
 │   ├── test_auth.py / test_workspaces.py / test_closed_loop.py
 │   ├── test_w3_endpoints.py  # 原 test_api.py 的 pytest 化版本
@@ -145,7 +145,7 @@ cp .env.example .env
 #    填好 Key 后重跑 demo_w2.py 即走 DeepSeek 真实推理（无 Key 自动 Mock 兜底）
 
 # 8. 跑测试套件（pytest，无需启动服务器；自动使用临时数据库 + 离线 Mock，不污染运行数据）
-python -m pytest          # 50 项：只读端点 / JWT 鉴权 / 业务域隔离 / 闭环编排 / 工具复用 / Mock 确定性 / W3 经典端点 / Prometheus 指标 / 限流
+python -m pytest          # 61 项：只读端点 / JWT 鉴权 / 业务域隔离 / 闭环编排 / 工具复用 / Mock 确定性 / 告警降噪分层 / W3 经典端点 / Prometheus 指标 / 限流
 
 # 9. W3/主界面：启动真实 HTTP 服务 —— FastAPI 同源托管 web/ 前端（8 视图）
 python -m uvicorn src.api.server:app --reload --port 8000
@@ -190,7 +190,7 @@ python app.py
 - 验证：`python scripts/test_jwt_e2e.py`（12 项断言）与 `python scripts/verify_project.py`（14 项，含 JWT 登录与数据清理）全绿
 
 **Phase 2 · 测试 + CI + 可观测性**
-- pytest 套件（`tests/`，50 项）：自动使用临时数据库 + 离线 Mock，**不污染运行数据**；覆盖鉴权/业务域 CRUD 与跨域隔离/告警闭环/需求派发/工具复用（活视图 + 登记兜底）/Mock 跨平台确定性/Agent 增删（含删域级联清理）/知识库 RAG/W3 经典端点/Prometheus 指标/限流（Phase 2 起 38 项，Phase 3 增 3 项限流测试，v0.7.x 增 Agent 删除 2 项、工具复用 3 项、Mock 确定性 3 项与级联清理 1 项）
+- pytest 套件（`tests/`，61 项）：自动使用临时数据库 + 离线 Mock，**不污染运行数据**；覆盖鉴权/业务域 CRUD 与跨域隔离/告警闭环/需求派发/工具复用（活视图 + 登记兜底）/Mock 跨平台确定性/Agent 增删（含删域级联清理）/知识库 RAG/W3 经典端点/Prometheus 指标/限流/告警降噪分层（Phase 2 起 38 项，Phase 3 增 3 项限流测试，v0.7.x 增 Agent 删除 2 项、工具复用 3 项、Mock 确定性 3 项与级联清理 1 项，v0.7.6 增降噪分层 11 项）
 - 测试隔离改造：`TELEOPS_DB_FILE` / `TELEOPS_TOOLS_DIR` / `TELEOPS_KB_DIR` 环境变量可注入；测试修掉了 `db.execute` 返回 None、`/alert` 缺字段崩溃两个真实 bug
 - CI：`.github/workflows/ci.yml`（GitHub Actions：3.11/3.13 矩阵跑 pytest + JS 语法检查 + 前端静态一致性校验 + Docker 镜像构建）；**已在 GitHub 实跑全绿**
 - Prometheus 指标：零第三方依赖实现 `GET /metrics`（Prometheus 文本格式），HTTP 请求计数/耗时直方图（按路由模板聚合）、Agent 任务数、LLM 调用数、业务域/Agent/需求实时 gauge；middleware 自动埋点
@@ -201,7 +201,7 @@ python app.py
 - **SQLite 高可用**：连接开启 `WAL`（读写不互斥）+ `synchronous=NORMAL` + `busy_timeout=5s`（锁冲突等待而非报错），适配「HTTP 读 + 后台 Agent 写」并发形态；进程崩溃不损坏库文件。
 - **健康检查分离**：`/health`（liveness：进程 + DB 存活、运行中任务数、uptime、限流状态）+ `/health/ready`（readiness：DB 可查询 + 数据目录可写才上报 ready），供编排器探活与决定是否引流。
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
-- 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，见 Phase 2 说明）。
+- 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
 **多租户决策（Phase 3 边界说明）**
 当前采用**两级轻量租户隔离**且已实测：

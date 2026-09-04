@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 from src.llm_client import extract_json
+from src import config
+from src.triage_rules import rule_triage
 
 
 class OpsAgent:
@@ -21,17 +23,49 @@ class OpsAgent:
         self.llm = llm
 
     # ---------- 1. 降噪 ----------
-    def normalize(self, alert: dict) -> dict:
-        """规则降噪：info 级 / 已知噪声模式 / 已标记 is_noise 视为噪声。"""
-        msg = (alert.get("message", "") + alert.get("metric", "")).lower()
-        noise_patterns = ["备份完成", "backup", "心跳正常", "ping_ok", "heartbeat"]
-        is_noise = (
-            alert.get("is_noise", False)
-            or alert.get("severity", "") == "info"
-            or any(p in msg for p in noise_patterns)
+    def _rule_triage(self, alert: dict):
+        """一次判定：快速挡掉明显噪声。判不出来返回 None，交给 LLM。
+
+        规则本体在 src/triage_rules.py，与离线 Mock 共用同一套判据，
+        保证 Mock 结果与真实行为一致（避免跨平台/跨模式结果漂移）。
+        """
+        return rule_triage(alert)
+
+    def _llm_triage(self, alert: dict) -> bool:
+        """二次降噪：规则无结论时，让 LLM 做一次语义判定。
+
+        仅在 _rule_triage 返回 None 时调用，避免每条告警都消耗 token。
+        解析失败时保守按「非噪声」处理——漏判比错杀安全。
+        """
+        prompt = (
+            "[TASK:TRIAGE]\n"
+            "你是运维告警分级专家。判断下列告警是否值得人工处理："
+            "已被系统自动纠正/恢复、例行备份心跳、纯信息输出等属于噪声；"
+            "真实服务异常属于非噪声。\n"
+            f"告警: {json.dumps(alert, ensure_ascii=False)}\n"
+            '输出 JSON: {"is_noise": true 或 false, "reason": "一句中文理由"}'
         )
-        return {**alert, "is_noise": bool(is_noise),
-                "normalized": False if is_noise else True}
+        try:
+            data = extract_json(self.llm.complete(prompt))
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("is_noise", False))
+
+    def normalize(self, alert: dict) -> dict:
+        """分层降噪：规则快判 → 无结论才交给 LLM 语义判定。"""
+        verdict = self._rule_triage(alert)
+        reason = "rule"
+        if verdict is None:
+            if config.LLM_TRIAGE:
+                verdict = self._llm_triage(alert)
+                reason = "llm"
+            else:
+                verdict = False
+                reason = "rule_inconclusive_no_llm"
+        return {**alert, "is_noise": bool(verdict),
+                "normalized": not verdict, "triage_by": reason}
 
     # ---------- 2. 根因推理 ----------
     def _build_context(self, alert: dict) -> str:

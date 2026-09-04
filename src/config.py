@@ -38,6 +38,10 @@ DEEPSEEK_MODEL = "deepseek-chat"
 LOCAL_MODEL_ENDPOINT = os.getenv("LOCAL_MODEL_ENDPOINT", "http://localhost:11434/v1")
 LOCAL_MODEL = "qwen2.5:7b"
 
+# 二次降噪：规则无结论时是否再让 LLM 做一次语义判定（1/0，默认开启）。
+# 关掉后规则判不出来的一律按「非噪声」处理，适合离线演示或节省 token。
+LLM_TRIAGE = os.getenv("TELEOPS_LLM_TRIAGE", "1") not in ("0", "false", "False", "")
+
 # 日志
 TRACE_DIR = ROOT / "traces"
 TRACE_DIR.mkdir(exist_ok=True)
