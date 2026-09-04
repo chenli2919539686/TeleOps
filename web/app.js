@@ -1322,6 +1322,7 @@ $("#wsSave").onclick = async () => {
 $("#openSettings").onclick = () => {
   syncSetModeUI(getWsModeFromUI());
   $("#setToken").value = TOKEN;
+  loadLlmConfig();
   openModal("settingsModal");
 };
 $("#setTokenSave").onclick = () => {
@@ -1331,6 +1332,77 @@ $("#setTokenSave").onclick = () => {
   checkAuth();
   alert(t ? "Token 已保存，写操作将自动携带。" : "已清除 Token（当前未启用鉴权或服务端未要求）。");
 };
+
+// ---- 设置面板：LLM 配置 ----
+const LLM_PRESETS = {
+  deepseek: { base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  siliconflow: { base_url: "https://api.siliconflow.cn/v1", model: "deepseek-ai/deepseek-chat" },
+  local: { base_url: "", model: "" },
+  custom: { base_url: "", model: "" },
+};
+async function loadLlmConfig() {
+  try {
+    const cfg = await (await apiFetch("/llm/config")).json();
+    const p = cfg.provider || "deepseek";
+    $("#setLlmProvider").value = p;
+    $("#setLlmTriage").checked = cfg.llm_triage !== false;
+    $("#setLlmBase").value = cfg.base_url || LLM_PRESETS[p].base_url;
+    $("#setLlmModel").value = cfg.model || LLM_PRESETS[p].model;
+    $("#setLlmLocalEndpoint").value = cfg.local_endpoint || "http://localhost:11434/v1";
+    $("#setLlmLocalModel").value = cfg.local_model || "qwen2.5:7b";
+    $("#setLlmKeyState").textContent = cfg.api_key_set ? "当前已配置" : "当前未配置";
+    $("#setLlmKey").value = "";
+    syncLlmProviderUI();
+  } catch (e) {
+    console.error("加载 LLM 配置失败", e);
+  }
+}
+function syncLlmProviderUI() {
+  const p = $("#setLlmProvider").value;
+  const isLocal = p === "local";
+  const showBase = !isLocal;
+  $("#setLlmLocalBox").style.display = isLocal ? "flex" : "none";
+  $("#setLlmBase").style.display = showBase ? "block" : "none";
+  $("#setLlmModel").style.display = showBase ? "block" : "none";
+  if (p !== "custom" && p !== "local") {
+    const preset = LLM_PRESETS[p];
+    if (!$("#setLlmBase").value.trim()) $("#setLlmBase").value = preset.base_url;
+    if (!$("#setLlmModel").value.trim()) $("#setLlmModel").value = preset.model;
+  }
+}
+$("#setLlmProvider").onchange = syncLlmProviderUI;
+$("#setLlmSave").onclick = async () => {
+  const body = {
+    provider: $("#setLlmProvider").value,
+    llm_triage: $("#setLlmTriage").checked,
+    base_url: $("#setLlmBase").value.trim(),
+    model: $("#setLlmModel").value.trim(),
+    local_endpoint: $("#setLlmLocalEndpoint").value.trim(),
+    local_model: $("#setLlmLocalModel").value.trim(),
+  };
+  const key = $("#setLlmKey").value.trim();
+  if (key) body.api_key = key;
+  try {
+    const r = await apiFetch("/llm/config", { method: "POST", body: JSON.stringify(body) });
+    if (!r.ok) { alert("保存失败：" + (await r.json()).detail); return; }
+    const cfg = await r.json();
+    $("#setLlmKey").value = "";
+    $("#setLlmKeyState").textContent = cfg.api_key_set ? "当前已配置" : "当前未配置";
+    alert("LLM 配置已保存");
+  } catch (e) { alert("保存 LLM 配置失败：" + e.message); }
+};
+$("#setLlmReset").onclick = () => {
+  $("#setLlmProvider").value = "deepseek";
+  $("#setLlmBase").value = "https://api.deepseek.com/v1";
+  $("#setLlmModel").value = "deepseek-chat";
+  $("#setLlmLocalEndpoint").value = "http://localhost:11434/v1";
+  $("#setLlmLocalModel").value = "qwen2.5:7b";
+  $("#setLlmKey").value = "";
+  $("#setLlmTriage").checked = true;
+  syncLlmProviderUI();
+};
+
 function syncSetModeUI(mode) {
   $$("#setMode .seg-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
 }

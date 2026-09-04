@@ -1,7 +1,7 @@
-"""LLMClient 抽象层：统一 DeepSeek / 本地 Ollama / 离线 Mock 接口。
+"""LLMClient 抽象层：统一 DeepSeek / OpenAI / 本地 Ollama / 离线 Mock 接口。
 
 设计目标：
-  - 换模型只改 config.py，不改动 Agent 代码（满足国产化/信创叙事）。
+  - 换模型只改运行时配置，不改动 Agent 代码（满足国产化/信创叙事）。
   - 有 Key 走真实大模型；无 Key 自动降级为确定性 Mock，保证脚手架在任何机器
     上都能端到端跑通（面试现场不怕环境缺依赖/缺网）。
   - Mock 用 [TASK:xxx] 标记路由，输出可被 Agent 稳定解析，演示故事连贯。
@@ -15,10 +15,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config import (
-    LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
-    LOCAL_MODEL_ENDPOINT, LOCAL_MODEL,
-)
+from src.config import load_llm_config
 from src.triage_rules import rule_triage, alert_from_prompt
 
 
@@ -44,28 +41,51 @@ def extract_json(text):
 
 
 class LLMClient:
-    def __init__(self, provider: str = LLM_PROVIDER):
-        self.provider = provider
+    def __init__(self, cfg: dict = None):
+        self._cfg = (cfg or load_llm_config()).copy()
         self._client = None
         self.mode = "live"  # live | mock
+        self._cached_key = None
+
+    def _cfg_key(self):
+        return (
+            self._cfg.get("provider"),
+            self._cfg.get("api_key"),
+            self._cfg.get("base_url"),
+            self._cfg.get("model"),
+            self._cfg.get("local_endpoint"),
+            self._cfg.get("local_model"),
+        )
 
     def _ensure_client(self):
-        if self._client is not None or self.mode == "mock":
+        # 每次调用都重新读取运行时配置，支持前端修改后无需重启
+        self._cfg = load_llm_config()
+        key = self._cfg_key()
+        if self._client is not None and key == self._cached_key:
             return
-        if self.provider == "deepseek":
-            if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "your_key_here":
+        self._client = None
+        self._cached_key = key
+        self.mode = "live"
+        provider = self._cfg.get("provider", "mock")
+        api_key = self._cfg.get("api_key", "")
+        base_url = self._cfg.get("base_url", "")
+        local_endpoint = self._cfg.get("local_endpoint", "http://localhost:11434/v1")
+        if provider in ("deepseek", "openai", "siliconflow", "custom"):
+            if not api_key or api_key.strip() in ("", "your_key_here"):
                 self.mode = "mock"
                 return
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-            except Exception:
+                self._client = OpenAI(api_key=api_key.strip(), base_url=base_url.strip() or None)
+            except Exception as e:
+                print(f"  [LLMClient] 创建 OpenAI client 失败：{e}")
                 self.mode = "mock"
-        elif self.provider == "local":
+        elif provider == "local":
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key="ollama", base_url=LOCAL_MODEL_ENDPOINT)
-            except Exception:
+                self._client = OpenAI(api_key="ollama", base_url=local_endpoint.strip() or None)
+            except Exception as e:
+                print(f"  [LLMClient] 创建 local client 失败：{e}")
                 self.mode = "mock"
         else:
             self.mode = "mock"
@@ -84,8 +104,11 @@ class LLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
         try:
+            model = self._cfg.get("model", "")
+            if self._cfg.get("provider") == "local":
+                model = self._cfg.get("local_model", "qwen2.5:7b")
             resp = self._client.chat.completions.create(
-                model=DEEPSEEK_MODEL if self.provider == "deepseek" else LOCAL_MODEL,
+                model=model or "deepseek-chat",
                 messages=messages,
                 temperature=temperature,
             )

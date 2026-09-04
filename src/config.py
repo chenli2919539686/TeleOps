@@ -3,6 +3,7 @@
 所有模块从这里我们取项目根目录、数据目录、模型名等，
 避免到处写硬编码路径。
 """
+import json
 import os
 from pathlib import Path
 
@@ -30,17 +31,58 @@ TOOLS_REGISTRY_FILE = DATA_DIR / "tools.json"
 REQUIREMENTS_FILE = DATA_DIR / "requirements.json"
 WORKSPACES_FILE = DATA_DIR / "workspaces.json"
 
-# 模型配置
-LLM_PROVIDER = "deepseek"          # deepseek | local
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"
-LOCAL_MODEL_ENDPOINT = os.getenv("LOCAL_MODEL_ENDPOINT", "http://localhost:11434/v1")
-LOCAL_MODEL = "qwen2.5:7b"
+# LLM 运行时配置落盘文件（比 .env 更适合热更新，不提交到 git）
+LLM_CONFIG_FILE = DATA_DIR / "llm_config.json"
+
+# 模型配置默认值（.env / 环境变量 -> 运行时 llm_config.json）
+DEFAULT_LLM_PROVIDER = os.getenv("TELEOPS_LLM_PROVIDER", "deepseek")
+DEFAULT_LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEFAULT_LLM_BASE_URL = os.getenv("TELEOPS_LLM_BASE_URL", "https://api.deepseek.com/v1")
+DEFAULT_LLM_MODEL = os.getenv("TELEOPS_LLM_MODEL", "deepseek-chat")
+DEFAULT_LOCAL_MODEL_ENDPOINT = os.getenv("LOCAL_MODEL_ENDPOINT", "http://localhost:11434/v1")
+DEFAULT_LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5:7b")
 
 # 二次降噪：规则无结论时是否再让 LLM 做一次语义判定（1/0，默认开启）。
 # 关掉后规则判不出来的一律按「非噪声」处理，适合离线演示或节省 token。
-LLM_TRIAGE = os.getenv("TELEOPS_LLM_TRIAGE", "1") not in ("0", "false", "False", "")
+DEFAULT_LLM_TRIAGE = os.getenv("TELEOPS_LLM_TRIAGE", "1") not in ("0", "false", "False", "")
+
+
+def load_llm_config() -> dict:
+    """读取运行时 LLM 配置；环境变量 < data/llm_config.json，支持热更新。"""
+    cfg = {
+        "provider": DEFAULT_LLM_PROVIDER,
+        "api_key": DEFAULT_LLM_API_KEY,
+        "base_url": DEFAULT_LLM_BASE_URL,
+        "model": DEFAULT_LLM_MODEL,
+        "local_endpoint": DEFAULT_LOCAL_MODEL_ENDPOINT,
+        "local_model": DEFAULT_LOCAL_MODEL,
+        "llm_triage": DEFAULT_LLM_TRIAGE,
+    }
+    try:
+        if LLM_CONFIG_FILE.exists():
+            data = json.loads(LLM_CONFIG_FILE.read_text(encoding="utf-8"))
+            for k in cfg:
+                if k in data:
+                    cfg[k] = data[k]
+    except Exception as e:
+        print(f"[config] 读取 {LLM_CONFIG_FILE} 失败：{e}")
+    return cfg
+
+
+def save_llm_config(cfg: dict):
+    """保存运行时 LLM 配置到 data/llm_config.json。"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LLM_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# 兼容旧代码与测试：保留模块级 LLM_TRIAGE 常量（运行时配置优先）
+LLM_TRIAGE = DEFAULT_LLM_TRIAGE
+
+
+def is_llm_triage_enabled() -> bool:
+    """读取运行时配置；若运行时未配置，回退到模块级常量（供测试 monkeypatch）。"""
+    return load_llm_config().get("llm_triage", LLM_TRIAGE)
+
 
 # 日志
 TRACE_DIR = ROOT / "traces"

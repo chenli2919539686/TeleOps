@@ -8,11 +8,12 @@ deploy/.env
 **/.env
 # 大型原始公开日志下载不入库（用 ingest_public.py --download 重新拉取）
 data/raw/*_2k.log
-# SQLite 数据库（运行时数据，不入库）
+# SQLite 数据库与运行时 LLM 配置（不入库）
 data/teleops.db
 data/teleops.db-journal
 data/teleops.db-wal
 data/teleops.db-shm
+data/llm_config.json
 logs/
 # 构建快照（scripts/build_hf_space.py 生成，非源码）
 hf_space_build/

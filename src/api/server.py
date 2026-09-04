@@ -40,7 +40,8 @@ from fastapi.responses import JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
-from src.config import TOPOLOGY_FILE, ALERTS_FILE, TRACE_DIR, DATA_DIR
+import src.config as _config_module
+from src.config import TOPOLOGY_FILE, ALERTS_FILE, TRACE_DIR, DATA_DIR, load_llm_config, save_llm_config
 from src.core.cmdb_graph import CMDBGraph
 from src.core.kb_store import KBStore
 from src.core.tool_registry import ToolRegistry
@@ -59,9 +60,9 @@ from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
-app = FastAPI(title="TeleOps 智能体平台", version="0.8.3")
+app = FastAPI(title="TeleOps 智能体平台", version="0.8.4")
 
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -182,6 +183,66 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
 
 metrics.set_help("teleops_rate_limited_total", "被限流拒绝的请求数（按方法/路径段）")
 app.add_middleware(_RateLimitMiddleware)
+
+
+# ---------------- LLM 运行时配置（前端设置面板可热更新） ----------------
+class LLMConfig(BaseModel):
+    provider: str = "deepseek"      # deepseek | openai | siliconflow | local | custom
+    api_key: str = ""               # 前端保存时不传此字段表示保留原值
+    base_url: str = ""
+    model: str = ""
+    local_endpoint: str = ""
+    local_model: str = ""
+    llm_triage: bool = True         # 规则无结论时是否再走 LLM 语义降噪
+
+
+LLM_PROVIDER_PRESETS = {
+    "deepseek": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"},
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+    "siliconflow": {"base_url": "https://api.siliconflow.cn/v1", "model": "deepseek-ai/deepseek-chat"},
+    "local": {"base_url": "", "model": ""},
+    "custom": {"base_url": "", "model": ""},
+}
+
+
+def _mask_llm_cfg(cfg: dict) -> dict:
+    out = cfg.copy()
+    out["api_key"] = "已设置" if cfg.get("api_key") else ""
+    out["api_key_set"] = bool(cfg.get("api_key"))
+    return out
+
+
+@app.get("/llm/config")
+def get_llm_config():
+    """读取当前 LLM 配置（返回的 api_key 已被掩码）。"""
+    return _mask_llm_cfg(load_llm_config())
+
+
+@app.post("/llm/config")
+async def update_llm_config(req: LLMConfig, request: Request):
+    """保存 LLM 配置；api_key 留空/星号/已设置均表示保留原值，不覆盖。"""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="未授权：请先登录或填写 API Token")
+    cfg = load_llm_config()
+    payload = req.dict(exclude_unset=True)
+    # 保护 api_key：空值或掩码代表不覆盖
+    if "api_key" in payload and payload["api_key"] in ("", "***", "已设置"):
+        payload.pop("api_key", None)
+    # 切换 provider 时自动回填预设 base_url / model（仅当用户没填）
+    preset = LLM_PROVIDER_PRESETS.get(payload.get("provider", cfg["provider"]), {})
+    if payload.get("provider") and payload.get("provider") != cfg.get("provider"):
+        for k in ("base_url", "model"):
+            if not payload.get(k) and preset.get(k):
+                payload[k] = preset[k]
+    cfg.update(payload)
+    save_llm_config(cfg)
+    # 同步模块级常量，让未重启的进程立即生效（尤其是 LLM_TRIAGE 开关）
+    _config_module.DEFAULT_LLM_TRIAGE = cfg.get("llm_triage", _config_module.DEFAULT_LLM_TRIAGE)
+    _config_module.LLM_TRIAGE = cfg.get("llm_triage", _config_module.LLM_TRIAGE)
+    # 热更新：让全局 LLMClient 在下次 complete 前重新初始化
+    llm._ensure_client()
+    return _mask_llm_cfg(cfg)
 
 
 # ---------------- 全局单例：启动时构建一次 ----------------
@@ -439,6 +500,7 @@ def health():
     return {
         "status": "ok",
         "version": VERSION,
+        "llm_provider": load_llm_config().get("provider", "mock"),
         "llm_mode": llm.mode,
         "nodes": len(cmdb.all_nodes()),
         "tools": len(tools.list_tools()),

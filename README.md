@@ -209,6 +209,14 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.4 · 设置面板配置 LLM：前端输入 API Key，支持多供应商切换**
+- **问题**：DeepSeek API Key 原先只能写在 `.env` 明文文件里，启动后才能用；无法在前端查看/修改，也无法切到 OpenAI / SiliconFlow / 本地 Ollama / 自定义 OpenAI-compatible 接口。
+- **运行时 LLM 配置**：新增 `data/llm_config.json` 持久化运行时 LLM 配置（provider、api_key、base_url、model、local endpoint、LLM 二次降噪开关），不进入 git，支持热更新。
+- **前端设置面板**：在「设置」里新增「🧠 大模型（LLM）配置」区块，支持选择供应商、填写 API Key、Base URL、模型名、本地 Ollama 地址、开关 LLM 二次降噪；API Key 不回显，仅显示「当前已配置 / 未配置」。
+- **后端端点**：`GET /llm/config` 返回已脱敏配置，`POST /llm/config` 保存配置并立即生效；切换供应商时自动回填预设 Base URL / 模型名（DeepSeek / OpenAI / SiliconFlow）。
+- **安全迁移**：将原 `.env` 中的真实 Key 迁移到 `data/llm_config.json`，`.env` 改为占位注释；`data/llm_config.json` 已加入 `.gitignore`。
+- 版本升级到 `0.8.4`，pytest 61 项全绿。
+
 **v0.8.3 · 修复 LLM 工具名漂移导致的重复造工具**
 - **问题**：真实 DeepSeek 调用下，OpsAgent 让 LLM 自由推荐 `recommended_tool`，同一光功率/温度问题每次返回不同名字（`optical_power_probe`、`display_transceiver_diagnosis`、`olt_onu_optical_probe`…），`detect_missing_tool` 只做精确字符串匹配，导致 55 条样本循环几轮造出 20+ 功能重复的工具，复用沉淀统计失真。
 - **Prompt 注入已有工具列表**：`OpsAgent.rootcause` 在根因 prompt 末尾追加「当前工具库已有工具：… 优先复用已有名字，只有确实没有合适工具时才推荐新名字」，从源头约束 LLM 命名。
