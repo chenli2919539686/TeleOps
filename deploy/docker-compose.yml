@@ -12,7 +12,8 @@
 services:
   backend:
     build:
-      context: .
+      # compose 文件位于 deploy/，上下文需指向项目根目录，才能正确解析 Dockerfile 中的 deploy/requirements.txt
+      context: ..
       dockerfile: deploy/Dockerfile
     image: teleops-backend:latest
     restart: unless-stopped
