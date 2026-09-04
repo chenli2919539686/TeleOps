@@ -14,6 +14,8 @@ data/teleops.db-journal
 data/teleops.db-wal
 data/teleops.db-shm
 data/llm_config.json
+# 运行期 LLM 用量统计（含每日花费流水，非源码）
+data/llm_usage.json
 logs/
 # 构建快照（scripts/build_hf_space.py 生成，非源码）
 hf_space_build/

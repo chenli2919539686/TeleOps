@@ -23,6 +23,7 @@ import os
 import json
 import time
 import threading
+import urllib.request
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -52,6 +53,7 @@ from src.core import db
 from src.core import auth
 from src.core import metrics
 from src.core import rate_limit as rl
+from src.core import usage
 from src.core.alert_stream import AlertStream, build_playlist
 from src.llm_client import LLMClient
 from src.agents.ops_agent import OpsAgent
@@ -60,9 +62,9 @@ from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
-app = FastAPI(title="TeleOps 智能体平台", version="0.8.4")
+app = FastAPI(title="TeleOps 智能体平台", version="0.8.5")
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -194,6 +196,8 @@ class LLMConfig(BaseModel):
     local_endpoint: str = ""
     local_model: str = ""
     llm_triage: bool = True         # 规则无结论时是否再走 LLM 语义降噪
+    budget_daily_cny: float = 0.0   # 每日预算上限（元），0 表示不限制
+    budget_action: str = "fallback" # warn | fallback | reject
 
 
 LLM_PROVIDER_PRESETS = {
@@ -242,7 +246,66 @@ async def update_llm_config(req: LLMConfig, request: Request):
     _config_module.LLM_TRIAGE = cfg.get("llm_triage", _config_module.LLM_TRIAGE)
     # 热更新：让全局 LLMClient 在下次 complete 前重新初始化
     llm._ensure_client()
+    # 预算调整后重置熔断提示，让用户下次超限能再看到日志
+    llm._budget_noticed = False
     return _mask_llm_cfg(cfg)
+
+
+@app.get("/llm/usage")
+def get_llm_usage():
+    """LLM 用量统计 + 预算状态（今日/累计调用数、token、估算费用）。"""
+    return usage.summary()
+
+
+@app.post("/llm/usage/reset")
+def reset_llm_usage(request: Request):
+    """清空用量统计（演示重置用）。"""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="未授权：请先登录或填写 API Token")
+    usage.reset()
+    return {"ok": True, **usage.summary()}
+
+
+@app.get("/llm/balance")
+def get_llm_balance():
+    """查询账户余额（服务端代理，API Key 不出后端）。
+
+    目前 DeepSeek 提供官方 /user/balance 接口；其他供应商尚未接入，
+    返回 supported=false，前端提示去平台控制台查看。
+    """
+    cfg = load_llm_config()
+    provider = (cfg.get("provider") or "").strip()
+    api_key = (cfg.get("api_key") or "").strip()
+    if provider != "deepseek" or not api_key:
+        return {
+            "supported": False,
+            "reason": "当前供应商暂不支持余额查询，请前往平台控制台查看",
+            "console_url": _provider_console_url(provider),
+        }
+    # 余额接口不在 /v1 下，需去掉 base_url 的版本后缀
+    base = (cfg.get("base_url") or "https://api.deepseek.com/v1").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = f"{base}/user/balance"
+    try:
+        req = urllib.request.Request(
+            url, headers={"Accept": "application/json",
+                          "Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return {"supported": True, "console_url": "https://platform.deepseek.com",
+                **data}
+    except Exception as e:
+        return {"supported": True, "error": str(e),
+                "console_url": "https://platform.deepseek.com"}
+
+
+def _provider_console_url(provider: str) -> str:
+    return {
+        "openai": "https://platform.openai.com/usage",
+        "siliconflow": "https://cloud.siliconflow.cn/expensebill",
+    }.get(provider, "")
 
 
 # ---------------- 全局单例：启动时构建一次 ----------------

@@ -1323,6 +1323,7 @@ $("#openSettings").onclick = () => {
   syncSetModeUI(getWsModeFromUI());
   $("#setToken").value = TOKEN;
   loadLlmConfig();
+  startUsagePolling();   // 面板开着时每 5s 刷新用量，跑告警流时能实时看到花费
   openModal("settingsModal");
 };
 $("#setTokenSave").onclick = () => {
@@ -1401,6 +1402,146 @@ $("#setLlmReset").onclick = () => {
   $("#setLlmKey").value = "";
   $("#setLlmTriage").checked = true;
   syncLlmProviderUI();
+};
+
+// ---- 设置面板：LLM 用量与预算护栏 ----
+// 告警流是无人值守的后台循环，会持续调 LLM。没有护栏的话一次长时间演示
+// 就可能烧掉整月额度，所以这里既要能看见花了多少，也要能设上限自动熔断。
+let _usageTimer = null;
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return "–";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}
+function fmtCny(v) {
+  if (v === null || v === undefined) return "–";
+  if (v >= 1) return "¥" + v.toFixed(2);
+  if (v > 0) return "¥" + v.toFixed(4);
+  return "¥0";
+}
+
+async function loadLlmUsage() {
+  try {
+    const d = await (await apiFetch("/llm/usage")).json();
+    const t = d.today || {};
+    $("#usageCalls").textContent = t.calls ?? 0;
+    $("#usageTokens").textContent =
+      fmtNum((t.prompt_tokens || 0) + (t.completion_tokens || 0));
+    $("#usageCost").textContent = fmtCny(t.cost_cny);
+    $("#usageTotalCost").textContent = fmtCny((d.total || {}).cost_cny);
+
+    const b = d.budget || {};
+    const wrap = $("#usageBarWrap"), bar = $("#usageBar");
+    if (b.daily_cny > 0) {
+      wrap.style.display = "flex";
+      const pct = Math.min(b.percent ?? 0, 100);
+      bar.style.width = pct + "%";
+      bar.className = b.exceeded ? "over" : (pct >= 80 ? "warn" : "");
+      $("#usageBarText").textContent =
+        `已用 ${fmtCny(b.spent_cny)} / 上限 ¥${b.daily_cny}（${pct}%）`;
+    } else {
+      wrap.style.display = "none";
+    }
+
+    const box = $("#usageAlert");
+    if (b.exceeded) {
+      const act = {
+        fallback: "已自动降级为 Mock 模式，不再产生费用",
+        warn: "仍会继续调用真实模型，请留意额度",
+        reject: "已拒绝所有 LLM 调用",
+      }[b.action] || "";
+      box.style.display = "block";
+      box.className = "usage-alert over";
+      box.textContent = `⚠️ 今日预算已用尽（上限 ¥${b.daily_cny}）：${act}。`;
+    } else if (b.daily_cny > 0 && (b.percent ?? 0) >= 80) {
+      box.style.display = "block";
+      box.className = "usage-alert";
+      box.textContent = `今日用量已达上限的 ${b.percent}%，接近预算。`;
+    } else {
+      box.style.display = "none";
+    }
+
+    $("#setBudgetLimit").value = b.daily_cny > 0 ? b.daily_cny : "";
+    $("#setBudgetAction").value = b.action || "fallback";
+  } catch (e) {
+    console.error("加载 LLM 用量失败", e);
+  }
+}
+
+function stopUsagePolling() {
+  if (_usageTimer) { clearInterval(_usageTimer); _usageTimer = null; }
+}
+function startUsagePolling() {
+  stopUsagePolling();
+  loadLlmUsage();
+  // 面板关掉后自动停止，避免后台一直轮询
+  _usageTimer = setInterval(() => {
+    const m = $("#settingsModal");
+    if (!m || !m.classList.contains("open")) { stopUsagePolling(); return; }
+    loadLlmUsage();
+  }, 5000);
+}
+
+$("#setUsageRefresh").onclick = () => loadLlmUsage();
+
+$("#setUsageReset").onclick = async () => {
+  if (!confirm("确定清空全部用量统计记录吗？此操作不可恢复。")) return;
+  try {
+    const r = await apiFetch("/llm/usage/reset", { method: "POST" });
+    if (!r.ok) { alert("清空失败：" + (await r.json()).detail); return; }
+    await loadLlmUsage();
+  } catch (e) { alert("清空用量失败：" + e.message); }
+};
+
+$("#setBudgetSave").onclick = async () => {
+  const raw = parseFloat($("#setBudgetLimit").value);
+  const limit = (isNaN(raw) || raw < 0) ? 0 : raw;
+  const action = $("#setBudgetAction").value;
+  // 只提交要改的字段；provider 必须传（Pydantic 有默认值），取当前值避免误切换
+  const body = {
+    provider: $("#setLlmProvider").value,
+    budget_daily_cny: limit,
+    budget_action: action,
+  };
+  try {
+    const r = await apiFetch("/llm/config", { method: "POST", body: JSON.stringify(body) });
+    if (!r.ok) { alert("保存失败：" + (await r.json()).detail); return; }
+    await loadLlmUsage();
+    if (limit > 0) {
+      const label = $("#setBudgetAction").selectedOptions[0].textContent;
+      alert(`预算已生效：每日 ¥${limit}，超限后「${label}」`);
+    } else {
+      alert("已关闭每日预算限制");
+    }
+  } catch (e) { alert("保存预算失败：" + e.message); }
+};
+
+$("#setBalanceQuery").onclick = async () => {
+  const btn = $("#setBalanceQuery");
+  btn.disabled = true;
+  $("#balanceText").textContent = "查询中…";
+  try {
+    const d = await (await apiFetch("/llm/balance")).json();
+    if (!d.supported) {
+      $("#balanceText").textContent =
+        "余额：" + (d.reason || "当前供应商不支持余额查询");
+      return;
+    }
+    if (d.error) { $("#balanceText").textContent = "查询失败：" + d.error; return; }
+    const infos = d.balance_infos || [];
+    if (!infos.length) { $("#balanceText").textContent = "未返回余额信息"; return; }
+    const txt = infos.map(i =>
+      `${i.currency} 可用 ¥${i.total_balance}（充值 ¥${i.topped_up_balance} · 赠金 ¥${i.granted_balance}）`
+    ).join("；");
+    $("#balanceText").textContent =
+      "账户余额：" + txt + (d.is_available ? "" : " ⚠️ 余额不足，调用可能失败");
+  } catch (e) {
+    $("#balanceText").textContent = "查询余额失败：" + e.message;
+  } finally {
+    btn.disabled = false;
+  }
 };
 
 function syncSetModeUI(mode) {

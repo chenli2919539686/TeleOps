@@ -32,7 +32,12 @@ REQUIREMENTS_FILE = DATA_DIR / "requirements.json"
 WORKSPACES_FILE = DATA_DIR / "workspaces.json"
 
 # LLM 运行时配置落盘文件（比 .env 更适合热更新，不提交到 git）
-LLM_CONFIG_FILE = DATA_DIR / "llm_config.json"
+#
+# 注意：本文件保存的是真实 API Key，测试环境必须通过 TELEOPS_LLM_CONFIG_FILE
+# 重定向到临时目录，否则 pytest 会读到开发者本机的 Key 去联网调用（既耗额度，
+# 又让结果不确定）。不能靠重定向 DATA_DIR 解决——拓扑/告警种子数据仍来自真实 data/。
+LLM_CONFIG_FILE = Path(os.environ.get("TELEOPS_LLM_CONFIG_FILE")
+                       or str(DATA_DIR / "llm_config.json"))
 
 # 模型配置默认值（.env / 环境变量 -> 运行时 llm_config.json）
 DEFAULT_LLM_PROVIDER = os.getenv("TELEOPS_LLM_PROVIDER", "deepseek")
@@ -47,8 +52,20 @@ DEFAULT_LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5:7b")
 DEFAULT_LLM_TRIAGE = os.getenv("TELEOPS_LLM_TRIAGE", "1") not in ("0", "false", "False", "")
 
 
+# 成本护栏：每日预算上限（元）与超限策略。
+#   daily_cny <= 0 表示不限制；action 取 warn（仅告警）/ fallback（降级 Mock）/ reject（拒绝）。
+# 默认给一个保守的日预算：告警流是无人值守循环，没有护栏可能几小时烧穿整月额度。
+DEFAULT_BUDGET_DAILY_CNY = float(os.getenv("TELEOPS_BUDGET_DAILY_CNY", "0") or 0)
+DEFAULT_BUDGET_ACTION = os.getenv("TELEOPS_BUDGET_ACTION", "fallback")
+
+
 def load_llm_config() -> dict:
-    """读取运行时 LLM 配置；环境变量 < data/llm_config.json，支持热更新。"""
+    """读取运行时 LLM 配置；环境变量 < data/llm_config.json，支持热更新。
+
+    注意：文件里的字段是「全量合并」而非按默认键白名单挑选——早期实现只复制
+    cfg 中已存在的键，导致后加的配置项（如 budget_daily_cny）写完读不回来，
+    静默失效。新增字段时无需再改这里。
+    """
     cfg = {
         "provider": DEFAULT_LLM_PROVIDER,
         "api_key": DEFAULT_LLM_API_KEY,
@@ -57,13 +74,14 @@ def load_llm_config() -> dict:
         "local_endpoint": DEFAULT_LOCAL_MODEL_ENDPOINT,
         "local_model": DEFAULT_LOCAL_MODEL,
         "llm_triage": DEFAULT_LLM_TRIAGE,
+        "budget_daily_cny": DEFAULT_BUDGET_DAILY_CNY,
+        "budget_action": DEFAULT_BUDGET_ACTION,
     }
     try:
         if LLM_CONFIG_FILE.exists():
             data = json.loads(LLM_CONFIG_FILE.read_text(encoding="utf-8"))
-            for k in cfg:
-                if k in data:
-                    cfg[k] = data[k]
+            if isinstance(data, dict):
+                cfg.update(data)
     except Exception as e:
         print(f"[config] 读取 {LLM_CONFIG_FILE} 失败：{e}")
     return cfg

@@ -26,6 +26,12 @@ os.environ["TELEOPS_API_TOKEN"] = ""      # 不启用共享 Token，只走 JWT
 os.environ["DEEPSEEK_API_KEY"] = ""       # 强制离线 Mock 推理
 os.environ["TELEOPS_RATE_LIMIT"] = "off"  # 全局关限流：既有用例不受窗口干扰；test_ratelimit 单独运行时打开
 
+# LLM 配置与用量统计同样必须隔离：DATA_DIR 不能被整体重定向（拓扑/告警种子
+# 数据仍来自真实 data/），但 data/llm_config.json 里存着开发者本机的真实 Key。
+# 不隔离的话 pytest 会读到它去联网调用——既烧额度，又让用例结果不确定。
+os.environ["TELEOPS_LLM_CONFIG_FILE"] = str(_TMP_DIR / "llm_config.json")
+os.environ["TELEOPS_USAGE_FILE"] = str(_TMP_DIR / "llm_usage.json")
+
 # 研发 Agent 造工具会落盘 .py 与 SOP 文档，同样重定向到临时目录，避免污染仓库
 _TMP_TOOLS = _TMP_DIR / "tools"
 _TMP_KB = _TMP_DIR / "kb"

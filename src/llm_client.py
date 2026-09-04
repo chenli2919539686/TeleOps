@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import load_llm_config
+from src.core import usage
 from src.triage_rules import rule_triage, alert_from_prompt
 
 
@@ -46,6 +47,33 @@ class LLMClient:
         self._client = None
         self.mode = "live"  # live | mock
         self._cached_key = None
+        self._budget_noticed = False  # 预算熔断提示只打一次，避免刷屏
+        self._budget_fallback_active = False  # 当前是否因预算熔断而降级（区别于「本来就没 Key」）
+
+    def _recover_from_budget_fallback(self):
+        """预算熔断是临时状态：预算调高或取消后应自动恢复 live 模式。
+
+        _ensure_client 只在 provider/api_key 等配置变化时重建客户端，预算变化
+        不在其判断范围内——若不在这里主动恢复，调高预算后客户端会一直卡在
+        mock 模式，必须重启服务才能继续用真实模型。
+        """
+        if not self._budget_fallback_active:
+            return
+        exceeded, _ = usage.check_budget()
+        if exceeded:
+            return
+        print("  [LLMClient] 预算限制已解除，恢复真实模型调用")
+        self._budget_fallback_active = False
+        self._budget_noticed = False
+        self._client = None
+        self._cached_key = None
+        self._ensure_client()  # 重新建连，内部会把 mode 重置为 live
+
+    @staticmethod
+    def _task_tag(prompt: str) -> str:
+        """从 prompt 里提取 [TASK:XXX] 标签，用于按任务类型统计用量。"""
+        m = re.search(r"\[TASK:([A-Z_0-9]+)\]", prompt or "")
+        return m.group(1) if m else "other"
 
     def _cfg_key(self):
         return (
@@ -92,11 +120,26 @@ class LLMClient:
 
     def complete(self, prompt: str, system: str = None, temperature: float = 0.2) -> str:
         self._ensure_client()
+        self._recover_from_budget_fallback()  # 预算恢复后自动脱离 Mock
         try:
             from src.core import metrics
             metrics.inc("teleops_llm_calls_total", mode=self.mode)
         except Exception:
             pass
+        # ---- 预算护栏：超限后按策略处置，避免无人值守的告警流烧穿预算 ----
+        exceeded, action = usage.check_budget()
+        if exceeded and action == "reject":
+            raise RuntimeError(
+                "[LLMClient] 今日 LLM 预算已用尽，已按策略拒绝调用。"
+                "可在「设置 → 用量与预算」中调整上限或改用 fallback 策略。")
+        if exceeded and action == "fallback" and self.mode != "mock":
+            if not self._budget_noticed:
+                print("  [LLMClient] 今日 LLM 预算已用尽，自动降级为 Mock（不再产生费用）")
+                self._budget_noticed = True
+            self.mode = "mock"
+            self._budget_fallback_active = True
+            return self._mock(prompt)
+
         if self.mode == "mock" or self._client is None:
             return self._mock(prompt)
         messages = []
@@ -107,17 +150,44 @@ class LLMClient:
             model = self._cfg.get("model", "")
             if self._cfg.get("provider") == "local":
                 model = self._cfg.get("local_model", "qwen2.5:7b")
+            model = model or "deepseek-chat"
             resp = self._client.chat.completions.create(
-                model=model or "deepseek-chat",
+                model=model,
                 messages=messages,
                 temperature=temperature,
             )
+            self._record_usage(resp, model, prompt)
             return resp.choices[0].message.content or ""
         except Exception as e:
             # 真实调用失败（限流/网络）时回退 Mock，保证演示不崩
             print(f"  [LLMClient] 真实调用失败，已回退 Mock：{e}")
             self.mode = "mock"
             return self._mock(prompt)
+
+    def _record_usage(self, resp, model: str, prompt: str = ""):
+        """解析响应里的 token 用量并计入统计（失败不影响主流程）。"""
+        try:
+            u = getattr(resp, "usage", None)
+            if not u:
+                return
+            prompt_tokens = int(getattr(u, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(u, "completion_tokens", 0) or 0)
+            cached = 0
+            details = getattr(u, "prompt_tokens_details", None)
+            if details is not None:
+                cached = int(getattr(details, "cached_tokens", 0) or 0)
+            elif isinstance(u, dict):
+                cached = int((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0)
+            usage.record(
+                provider=self._cfg.get("provider", ""),
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cached_tokens=cached,
+                task=self._task_tag(prompt),
+            )
+        except Exception as e:
+            print(f"  [LLMClient] 用量统计失败（不影响调用）：{e}")
 
     # ---- 离线确定性 Mock：按 [TASK:xxx] 路由 ----
     def _mock(self, prompt: str) -> str:

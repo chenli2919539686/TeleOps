@@ -209,6 +209,19 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.5 · LLM 用量统计与预算护栏（防止告警流烧穿额度）**
+- **问题**：实时告警流是无人值守的后台循环，会持续调用 LLM（降噪 → 根因 → 造工具 → 写 SOP）。此前 `LLMClient` 完全没有 token 统计、也没有任何预算控制，长时间演示可能几小时烧掉整月额度，且用户无法知道已经花了多少。
+- **用量计量**：新增 `src/core/usage.py`，按天累计调用次数 / prompt tokens / completion tokens / 缓存命中 tokens / 估算费用，落盘 `data/llm_usage.json`（保留最近 30 天，按 `[TASK:xxx]` 标签分任务统计）。费用按 provider + model 查定价表估算，DeepSeek 的输入缓存命中按折扣价计，本地 Ollama / Mock 计 0 元。
+- **预算护栏**：设置面板可配「每日上限（元）」与超限策略——`fallback`（默认，自动降级 Mock，不再产生费用）/ `warn`（仅告警，继续调用）/ `reject`（直接拒绝）。设为 0 表示不限制。
+- **熔断可恢复**：预算调高或解除后自动脱离降级状态恢复真实调用（修复了早期实现会一直卡在 Mock、必须重启服务的问题）。
+- **账户余额查询**：新增 `GET /llm/balance`，服务端代理 DeepSeek 官方 `/user/balance` 接口，**API Key 不出后端**；其他供应商返回对应控制台地址。
+- **前端设置面板**：新增「💰 用量与预算」区块——今日调用数 / Token / 估算费用 / 累计费用四宫格、预算进度条（≥80% 转黄、超限转红）、熔断提示、每日上限与策略输入、余额查询按钮。面板打开时每 5 秒自动刷新，跑告警流时可实时看到花费上涨。
+- **新增端点**：`GET /llm/usage`（用量 + 预算状态）、`POST /llm/usage/reset`（清空统计，需鉴权）、`GET /llm/balance`（账户余额）。
+- **顺带修复**：`load_llm_config` 原先只从配置文件里挑「默认值 dict 中已存在的键」，导致后加的配置项（如 `budget_daily_cny`）写完读不回来、静默失效；已改为全量合并。另修正设置面板中 `var(--panel-bg)` / `var(--muted)` 两个不存在的 CSS 变量（应为 `--panel` / `--text-dim`）。
+- **测试隔离修复**：`tests/conftest.py` 此前未隔离 `data/llm_config.json`，开发者本机配了真实 Key 后 pytest 会联网调用（既烧额度又让结果不确定）。新增 `TELEOPS_LLM_CONFIG_FILE` / `TELEOPS_USAGE_FILE` 环境变量重定向到临时目录，测试耗时从数十秒降到 5 秒内。
+- 新增 `tests/test_llm_budget.py` 10 项（用量累计、缓存折扣计价、本地模型免费、三种策略行为、熔断事件只记一次、预算解除后恢复）；**全量 pytest 71 项全绿**。
+- 实测（DeepSeek 真实调用）：设 ¥0.01 上限后调用自动转 Mock，`calls` 与花费纹丝不动；调到 ¥2 后不重启服务立即恢复真实调用。
+
 **v0.8.4 · 设置面板配置 LLM：前端输入 API Key，支持多供应商切换**
 - **问题**：DeepSeek API Key 原先只能写在 `.env` 明文文件里，启动后才能用；无法在前端查看/修改，也无法切到 OpenAI / SiliconFlow / 本地 Ollama / 自定义 OpenAI-compatible 接口。
 - **运行时 LLM 配置**：新增 `data/llm_config.json` 持久化运行时 LLM 配置（provider、api_key、base_url、model、local endpoint、LLM 二次降噪开关），不进入 git，支持热更新。
