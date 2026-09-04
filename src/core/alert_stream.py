@@ -124,7 +124,9 @@ class AlertStream:
         self._lock = threading.Lock()
         self._playlist: List[dict] = []
         self._feed: List[dict] = []
+        self._tasks: List[dict] = []         # 作战室任务队列（告警→分配Agent→处置）
         self._seq = 0
+        self._seq_task = 0
         self._rounds = 0
         self._idx = 0
         self._running = False
@@ -132,24 +134,33 @@ class AlertStream:
         self._profile = "mixed"
         self._interval_ms = 1200
         self._loop = True
+        self._ops_id: Optional[str] = None    # 流水线默认归属的运维 Agent
         self._current: Optional[dict] = None
         self._last_error: Optional[str] = None
+        self.TASK_MAX = 200                    # 任务环形上限，防内存膨胀
 
     # ---------- 控制 ----------
     def start(self, playlist: List[dict], profile: str = "mixed",
-              interval_ms: int = 1200, loop: bool = True) -> bool:
-        """启动播放器。已在运行则返回 False。"""
+              interval_ms: int = 1200, loop: bool = True,
+              ops_agent_id: Optional[str] = None) -> bool:
+        """启动播放器。已在运行则返回 False。
+
+        ops_agent_id：本场流水线处置告警归属的运维 Agent（用于作战室任务队列展示）。
+        """
         with self._lock:
             if self._running:
                 return False
             self._playlist = list(playlist or [])
             self._feed = []
+            self._tasks = []
             self._seq = 0
+            self._seq_task = 0
             self._rounds = 0
             self._idx = 0
             self._profile = profile
             self._interval_ms = max(200, int(interval_ms))
             self._loop = bool(loop)
+            self._ops_id = ops_agent_id
             self._running = True
             self._started_at = time.time()
             self._current = None
@@ -185,6 +196,9 @@ class AlertStream:
                 break
             alert = self._playlist[idx % n]
             self._set_current(alert, idx)
+            # 作战室任务队列：每条告警入队 → 处理中 → 处置完成（状态由 entry 决定）
+            task_id = self._enqueue_task(alert)
+            self._update_task(task_id, status="processing")
             t0 = time.time()
             item: dict = {}
             try:
@@ -202,6 +216,7 @@ class AlertStream:
             item.setdefault("noise", False)
             item.setdefault("loop", "none")
             item.setdefault("error", "")
+            self._finish_task(task_id, item)
             with self._lock:
                 self._seq += 1
                 item["seq"] = self._seq
@@ -236,6 +251,77 @@ class AlertStream:
             self._current = cur
             if idx is not None:
                 self._idx = idx
+
+    # ---------- 任务队列（作战室可见） ----------
+    def _new_task_id(self) -> str:
+        with self._lock:
+            self._seq_task += 1
+            return f"TA-{self._seq_task:03d}"
+
+    def _enqueue_task(self, alert: dict) -> str:
+        tid = self._new_task_id()
+        now = datetime.now().isoformat(timespec="seconds")
+        task = {
+            "task_id": tid,
+            "alert_id": alert.get("alert_id", "?"),
+            "severity": alert.get("severity", ""),
+            "host": alert.get("host", ""),
+            "metric": alert.get("metric", ""),
+            "message": str(alert.get("message", ""))[:100],
+            "assigned_agent": self._ops_id,
+            "status": "queued",
+            "loop": "none",
+            "tool_name": "",
+            "summary": "",
+            "error": "",
+            "at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            self._tasks.append(task)
+            if len(self._tasks) > self.TASK_MAX:
+                self._tasks = self._tasks[-self.TASK_MAX:]
+        return tid
+
+    def _update_task(self, task_id: str, **fields) -> Optional[dict]:
+        with self._lock:
+            for t in reversed(self._tasks):
+                if t["task_id"] == task_id:
+                    t.update(fields)
+                    t["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    return t
+        return None
+
+    def _finish_task(self, task_id: str, entry: dict) -> None:
+        """根据处置 entry 收敛任务终态。"""
+        if entry.get("error"):
+            status = "failed"
+        elif entry.get("noise"):
+            status = "suppressed"      # 噪声：规则/LLM 降噪抑制，不进队列
+        else:
+            loop = entry.get("loop", "none")
+            if loop == "created":
+                status = "closed"      # 缺工具→研发造→运维复用，闭环完成
+            elif loop == "reused":
+                status = "closed"      # 复用沉淀工具，直接处置
+            elif loop == "pending":
+                status = "escalated"   # 缺口已登记，等待研发派发
+            else:
+                status = "done"        # 已有工具直接处置完成
+        self._update_task(
+            task_id, status=status,
+            loop=entry.get("loop", "none"),
+            tool_name=entry.get("tool_name", ""),
+            summary=entry.get("summary", ""),
+            error=entry.get("error", ""),
+        )
+
+    def tasks(self, limit: int = 50) -> List[dict]:
+        """最近任务（按时间倒序），供作战室任务队列渲染。"""
+        with self._lock:
+            items = list(self._tasks)
+        items.reverse()
+        return items[:limit]
 
     # ---------- 只读视图 ----------
     def status(self) -> dict:

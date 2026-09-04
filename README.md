@@ -22,15 +22,15 @@
 
 ![TeleOps 架构](docs/architecture.svg)
 
-> **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 9 视图经 FastAPI 同源托管（新增 **实时告警流** 监控大屏，让 Agent 持续降噪/根因/处置并自动演示沉淀→复用），多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
+> **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 9 视图经 FastAPI 同源托管（新增 **实时告警流** 监控大屏，让 Agent 持续降噪/根因/处置并自动演示沉淀→复用；流水线告警进一步落地为作战室 **实时任务队列**，每条告警作为任务分配给运维 Agent），多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
 
 ## 界面演示
 
 以下截图均由本地后端（`127.0.0.1:8000`）真实渲染，通过 `scripts/capture_shots.js`（playwright-core + 系统 Edge）自动捕获，可直接用于面试/答辩演示。
 
-| Agent 作战室 | 实时告警流 | 闭环看板 |
+| Agent 作战室 + 实时任务队列 | 实时告警流 | 闭环看板 |
 |---|---|---|
-| ![作战室](docs/shots/overview.png) | ![实时告警流](docs/shots/stream.png) | ![闭环看板](docs/shots/loop.png) |
+| ![作战室任务队列](docs/shots/war-tasks.png) | ![实时告警流](docs/shots/stream.png) | ![闭环看板](docs/shots/loop.png) |
 | **消息栏需求看板** | **接入层** | **拓扑视图** |
 | ![消息栏](docs/shots/board.png) | ![接入层](docs/shots/integ.png) | ![拓扑](docs/shots/topo.png) |
 | **工具库** | **知识库** | **Agent 工作台（含告警样本库）** |
@@ -176,6 +176,7 @@ python app.py
 - [x] **W3 后端 API**：FastAPI 把底层能力 + 双 Agent 暴露为 HTTP 接口，含 `/alert /chat /feedback /closed-loop/run` 等，闭环自动化；pytest 套件（`tests/`）验证全绿
 - [x] **W4 前端 + 部署 + 求职材料**：**主界面 = FastAPI 同源托管 `web/` 前端**（原生 HTML/CSS/JS，左导航：Agent 作战室 / **实时告警流** / 闭环看板 / 消息栏 / 接入层 / 拓扑视图 / 工具库 / 知识库），含 Agent 增删、告警根因分析、真实告警样本库（55 条）、工具复用闭环；历史 Gradio 前台（app.py）留作 HF Spaces 备选；CAREER.md（STAR 话术 / 1 页简介）、DEMO_SCRIPT.md（录屏分镜）
 - [x] **v0.8.0 · 持续监控演示**：新增后端 `src/core/alert_stream.py` 模拟告警流水线 + `/stream/*` API（start/stop/reset/status/feed）+ 前端「实时告警流」面板；流水线按节拍持续推送告警，Agent 逐条降噪/根因/处置，缺工具自动登记派发研发，后续同类故障直接复用沉淀，像真实监控大屏一样滚动展示。CLI 演示 `scripts/demo_stream.py` 同步可用。
+- [x] **v0.8.1 · 告警→任务队列**：把「实时告警流」从独立大屏接入作战室。新增 `src/core/alert_stream.py` 任务生命周期（queued → processing → done/suppressed/escalated/closed）+ `/stream/tasks` 端点；作战室 Agent 卡片实时显示「当前任务：A-XXX @ host-1 处置中」，作战室新增「实时任务队列」列表，展示每条告警的分配 Agent、状态徽章、闭环结果（造工具 / 复用 / 抑制）。修复 `RequirementBoard` 主键冲突，让 `reset-demo` 可反复重演。
 
 > 国产化叙事点：LLMClient 抽象层可无缝切换 DeepSeek / Qwen / GLM；工具与知识库均可私有化部署。
 
@@ -207,6 +208,12 @@ python app.py
 - **健康检查分离**：`/health`（liveness：进程 + DB 存活、运行中任务数、uptime、限流状态）+ `/health/ready`（readiness：DB 可查询 + 数据目录可写才上报 ready），供编排器探活与决定是否引流。
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
+
+**v0.8.1 · 告警流进作战室：实时任务队列**
+- **任务队列模型**：在 `src/core/alert_stream.py` 中新增 task 生命周期（`queued → processing → done/suppressed/escalated/closed`），每条非噪声告警作为一个任务自动分配给流水线归属的运维 Agent；任务状态随处置过程实时收敛，并暴露 `GET /stream/tasks?limit=N&agent_id=` 供作战室轮询。
+- **作战室实时联动**：Agent 卡片下方新增「当前任务」行，显示该 Agent 正在处理的告警（如 `A-TEMP @ host-1 处置中`）；作战室新增「实时任务队列」区块，展示任务 ID、告警、主机、分配 Agent、状态徽章、闭环徽章（造工具 / 复用 / 已抑制）。状态与后端 `registry.status` 同步刷新，流水线停止后状态立即显示「未运行」。
+- **闭环修复与健壮性**：修复 `RequirementBoard` 因内存 seq 漂移导致的历史 `requirements.id` 主键冲突；`POST /stream/reset-demo` 现在会一并清空 `requirements` 表，让「缺工具 → 造工具 → 复用」闭环可反复重演；`pytest 61 项全绿`。
+- **版本统一升级到 0.8.1**：`package.json`、`src/api/server.py`、`web/index.html` 缓存戳同步。
 
 **v0.8.0 · 持续告警流演示**
 - 新增 `src/core/alert_stream.py` 模拟告警流水线：把 `data/alerts.json` 的 55 条真实机群样本 + 3 条接入域故障剧本编排成「时间轴告警流」，后台线程按节拍持续推送；处置链路复用既有 `_ingest_flow`（与 webhook 接入完全一致），实现「缺工具 → 研发造工具 → 运维复用」闭环，并演示第二轮同类故障直接复用沉淀。

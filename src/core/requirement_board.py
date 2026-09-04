@@ -17,16 +17,17 @@ from src.core import db
 class RequirementBoard:
     def __init__(self, path=None):
         # path 参数保留以兼容旧调用；持久化已统一走 SQLite
-        self._seq = self._next_seq()
+        self._seq = 1
 
     def _next_seq(self) -> int:
+        """实时计算下一个 REQ 编号（避免内存 seq 漂移导致与历史数据主键冲突）。"""
         rows = db.query("SELECT id FROM requirements WHERE id LIKE 'REQ-%'")
         nums = [int(r["id"].split("-")[-1]) for r in rows if r["id"].startswith("REQ-")]
         return (max(nums) if nums else 0) + 1
 
     def add(self, req: dict) -> dict:
-        req.setdefault("id", f"REQ-{self._seq:03d}")
-        self._seq += 1
+        if not req.get("id"):
+            req["id"] = f"REQ-{self._next_seq():03d}"
         now = datetime.now().isoformat(timespec="seconds")
         req.setdefault("status", "pending")
         req.setdefault("workspace_id", None)

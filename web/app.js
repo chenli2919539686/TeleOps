@@ -872,7 +872,76 @@ async function refreshWarStatuses() {
       const dot = document.getElementById("wbDot");
       if (dot) dot.className = "status-dot " + (map[wbId] || "idle");
     }
+    // 作战室任务队列（来自「实时告警流」流水线）实时刷新
+    renderStreamTasks();
   } catch (e) {}
+}
+
+// 任务状态中文 + 配色 class 映射
+function taskStatusTxt(s) {
+  return ({ queued: "排队中", processing: "处置中", done: "已处置",
+            suppressed: "已抑制", escalated: "已升级研发", closed: "闭环完成",
+            failed: "失败" }[s]) || s;
+}
+
+function taskRowHtml(t) {
+  const sev = (t.severity || "").toLowerCase();
+  const st = t.status;
+  const agent = (WAR_AGENTS[t.assigned_agent] && WAR_AGENTS[t.assigned_agent].name)
+    || t.assigned_agent || "—";
+  const loopBadge = t.loop === "created" ? `<span class="sf-badge created">🔧 造工具</span>`
+    : t.loop === "reused" ? `<span class="sf-badge reused">♻ 复用</span>`
+    : t.loop === "pending" ? `<span class="sf-badge pending">⏳ 待研发</span>` : "";
+  const err = t.error ? ` · <span class="wt-err">${escapeHtml(t.error)}</span>` : "";
+  return `<div class="task-row sev-${sev}">
+    <div class="tr-id">${escapeHtml(t.task_id)}</div>
+    <div class="tr-alert"><b>${escapeHtml(t.alert_id)}</b> <span class="tr-host">@ ${escapeHtml(t.host || "-")}</span></div>
+    <div class="tr-agent"><span class="status-dot ${st}"></span>${escapeHtml(agent)}</div>
+    <div class="tr-status"><span class="task-pill ${st}">${taskStatusTxt(st)}</span> ${loopBadge}</div>
+    <div class="tr-sum">${escapeHtml(t.summary || "")}${err}</div>
+  </div>`;
+}
+
+// 作战室任务队列：把「实时告警流」流水线里的告警按任务展示，并同步到各 Agent 卡片
+async function renderStreamTasks() {
+  const box = document.getElementById("warTasksBody");
+  const live = document.getElementById("taskLive");
+  const liveTxt = document.getElementById("taskLiveTxt");
+  if (!box) return;
+  try {
+    const r = await apiFetch(`/stream/tasks?limit=30`);
+    const d = await r.json();
+    const tasks = d.tasks || [];
+    if (live) {
+      live.className = "live-pill " + (d.running ? "live" : "idle");
+      if (liveTxt) liveTxt.textContent = d.running ? "流水线运行中" : "未运行";
+    }
+    if (!tasks.length) {
+      box.innerHTML = `<div class="empty">流水线未启动。「实时告警流」启动后，告警会作为任务自动分配给对应运维 Agent，并显示在这里。</div>`;
+      return;
+    }
+    // 各 Agent 卡片的「当前任务」行：优先显示进行中/排队/升级，否则显示最近一条
+    const byAgent = {};
+    tasks.forEach(t => { (byAgent[t.assigned_agent] = byAgent[t.assigned_agent] || []).push(t); });
+    Object.keys(WAR_AGENTS).forEach(id => {
+      const el = document.getElementById("wartask-" + id);
+      if (!el) return;
+      const list = byAgent[id] || [];
+      const active = list.find(t => ["processing", "queued", "escalated"].includes(t.status)) || list[0];
+      if (active) {
+        el.innerHTML = `<span class="wt-dot ${active.status}"></span>`
+          + `<span class="wt-alert">${escapeHtml(active.alert_id)}</span>`
+          + `<span class="wt-host">@ ${escapeHtml(active.host || "-")}</span>`
+          + `<span class="wt-st">${taskStatusTxt(active.status)}</span>`;
+        el.style.display = "flex";
+      } else {
+        el.style.display = "none";
+      }
+    });
+    box.innerHTML = tasks.map(taskRowHtml).join("");
+  } catch (e) {
+    box.innerHTML = `<div class="empty">任务队列加载失败：${escapeHtml(e.message)}</div>`;
+  }
 }
 function warCard(a, locked) {
   const st = a.status || "idle";
@@ -883,6 +952,7 @@ function warCard(a, locked) {
     <div class="war-top"><span class="war-name">${a.name}</span><span class="status-dot ${st}"></span></div>
     <div class="war-id">${a.id} · ${stTxt}</div>
     <div class="war-scope">${(a.scope || []).map(s => `<span>${escapeHtml(s)}</span>`).join("")}</div>
+    <div class="war-task" id="wartask-${a.id}" style="display:none"></div>
     <div class="war-actions"><button class="icon-btn" data-edit="${a.id}" title="改名 / 编辑">✎</button>${del}</div>
     <div class="war-foot">⤢ 点击打开工作台</div>
   </div>`;

@@ -59,9 +59,9 @@ from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
-app = FastAPI(title="TeleOps 智能体平台", version="0.8.0")
+app = FastAPI(title="TeleOps 智能体平台", version="0.8.1")
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -860,7 +860,7 @@ def stream_start(req: StreamStartReq):
     ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
     stream._process = _stream_make_processor(req.workspace_id, ops_id, mode)
     stream.start(playlist, profile=req.profile,
-                 interval_ms=req.interval_ms, loop=req.loop)
+                 interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id)
     return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
             "mode": mode, "playlist_len": len(playlist), "detail": stream.status()}
 
@@ -882,6 +882,8 @@ def stream_reset_demo():
     stream.stop()
     db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
                "AND (workspace_id IS NULL OR workspace_id='')")
+    # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
+    db.execute("DELETE FROM requirements")
     return {"status": "reset",
             "tools": [r["name"] for r in db.query(
                 "SELECT name FROM tools ORDER BY name")]}
@@ -897,6 +899,18 @@ def stream_status():
 def stream_feed(after: int = 0):
     """增量拉取处置流水（seq > after），供前端像监控大屏一样滚动渲染。"""
     return {"items": stream.feed(after=after)}
+
+
+@app.get("/stream/tasks")
+def stream_tasks(limit: int = 50, agent_id: Optional[str] = None):
+    """作战室任务队列：把流水线告警按「分配运维 Agent → 处置 → 闭环」可视化。
+
+    可选 agent_id 过滤只看某 Agent 的任务；limit 控制返回最近 N 条。
+    """
+    items = stream.tasks(limit=limit)
+    if agent_id:
+        items = [t for t in items if t.get("assigned_agent") == agent_id]
+    return {"tasks": items, "running": stream.running}
 
 
 # ---------------- 多 Agent 矩阵 + 消息栏（人工 / 自动派发闭环） ----------------

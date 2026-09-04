@@ -6,7 +6,7 @@
   <title>TeleOps · 智能体平台</title>
   <link rel="icon" href="logo.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="styles.css?v=0.8.0" />
+  <link rel="stylesheet" href="styles.css?v=0.8.1" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -109,6 +109,17 @@
           </div>
           <div class="war-loop-body" id="warLoopBody">
             <div class="empty">加载中…</div>
+          </div>
+        </div>
+
+        <div class="war-tasks" id="warTasks">
+          <div class="war-loop-head">
+            <span class="layer-ico">📋</span> 实时任务队列
+            <span class="war-loop-sub">告警流入 → 分配运维 Agent → 处置 / 闭环（来自「实时告警流」流水线）</span>
+            <span class="live-pill idle" id="taskLive" style="margin-left:auto"><span class="live-dot"></span><span id="taskLiveTxt">未运行</span></span>
+          </div>
+          <div class="war-tasks-body" id="warTasksBody">
+            <div class="empty">流水线未启动。「实时告警流」启动后，告警会作为任务自动分配给对应运维 Agent，并显示在这里。</div>
           </div>
         </div>
       </section>
@@ -418,6 +429,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.0"></script>
+  <script src="app.js?v=0.8.1"></script>
 </body>
 </html>
