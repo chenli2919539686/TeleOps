@@ -18,10 +18,15 @@ from src.llm_client import LLMClient
 
 @pytest.fixture(autouse=True)
 def _clean_usage():
-    """每个用例前后清空用量与预算配置，避免相互干扰。"""
-    usage.reset()
+    """每个用例前后清空用量与预算/单价配置，避免相互干扰。"""
+    def _clear():
+        usage.reset()
+        cfg = load_llm_config()
+        cfg.pop("pricing", None)
+        save_llm_config(cfg)
+    _clear()
     yield
-    usage.reset()
+    _clear()
 
 
 def _set_budget(daily_cny: float, action: str = "fallback"):
@@ -161,3 +166,71 @@ def test_budget_event_recorded_once():
         usage.check_budget()
     s = usage.summary()
     assert len([e for e in s["events"] if e["action"] == "fallback"]) == 1
+
+
+# ---------------- 自定义单价（v0.8.6） ----------------
+
+def _set_pricing(pricing: dict):
+    cfg = load_llm_config()
+    cfg["pricing"] = pricing
+    save_llm_config(cfg)
+
+
+def test_custom_pricing_overrides_builtin():
+    """自定义单价应覆盖内置定价表，缓存命中也按自定义折扣价计。"""
+    _set_pricing({"deepseek.deepseek-chat": [10.0, 5.0, 20.0]})
+    assert usage.estimate_cost("deepseek", "deepseek-chat",
+                               prompt_tokens=1_000_000, completion_tokens=0) == pytest.approx(10.0)
+    assert usage.estimate_cost("deepseek", "deepseek-chat",
+                               prompt_tokens=1_000_000, completion_tokens=0,
+                               cached_tokens=1_000_000) == pytest.approx(5.0)
+    assert usage.estimate_cost("deepseek", "deepseek-chat",
+                               prompt_tokens=0,
+                               completion_tokens=1_000_000) == pytest.approx(20.0)
+    assert usage.price_info("deepseek", "deepseek-chat")["source"] == "custom"
+
+
+def test_custom_pricing_bare_model_key():
+    """pricing 只写裸模型名时，对任意 provider 的同名模型生效。"""
+    _set_pricing({"some-model": [1.0, 0.5, 2.0]})
+    assert usage.estimate_cost("custom", "some-model",
+                               prompt_tokens=1_000_000, completion_tokens=0) == pytest.approx(1.0)
+
+
+def test_custom_pricing_two_element_form():
+    """二元组 [输入, 输出] 写法：缓存命中按 0 折（无缓存折扣价）。"""
+    _set_pricing({"x.y": [3.0, 6.0]})
+    assert usage.estimate_cost("x", "y", prompt_tokens=1_000_000,
+                               completion_tokens=1_000_000) == pytest.approx(9.0)
+    assert usage.estimate_cost("x", "y", prompt_tokens=1_000_000,
+                               completion_tokens=0,
+                               cached_tokens=1_000_000) == pytest.approx(0.0)
+
+
+def test_invalid_custom_pricing_falls_back():
+    """非法单价（字符串/负数/长度不对）一律跳过，回退内置表，绝不中断计费。"""
+    _set_pricing({
+        "deepseek.deepseek-chat": "not-a-price",
+        "openai.gpt-4o-mini": [-1, 0, 0],
+        "openai.gpt-4o": [1.0, 2.0, 3.0, 4.0],
+    })
+    assert usage.estimate_cost("deepseek", "deepseek-chat",
+                               prompt_tokens=1_000_000, completion_tokens=0) == pytest.approx(2.0)
+    assert usage.estimate_cost("openai", "gpt-4o-mini",
+                               prompt_tokens=1_000_000, completion_tokens=0) == pytest.approx(1.08)
+    assert usage.price_info("deepseek", "deepseek-chat")["source"] == "builtin"
+
+
+def test_price_info_sources():
+    """来源标注：内置表 / 未知模型保守默认 / 本地免费。"""
+    assert usage.price_info("deepseek", "deepseek-chat")["source"] == "builtin"
+    assert usage.price_info("openai", "gpt-99")["source"] == "default"
+    assert usage.price_info("local", "qwen2.5:7b")["source"] == "free"
+
+
+def test_custom_pricing_summary_exposed():
+    """/llm/usage 应携带当前生效单价与来源，供前端展示。"""
+    _set_pricing({"deepseek.deepseek-chat": [9.9, 0, 9.9]})
+    s = usage.summary()
+    assert s["pricing"]["source"] == "custom"
+    assert s["pricing"]["price"] == [9.9, 0.0, 9.9]

@@ -85,10 +85,42 @@ def _save(data: dict):
         print(f"[usage] 写入 {USAGE_FILE} 失败：{e}")
 
 
+def _as_price(v) -> tuple | None:
+    """把用户配置的单价规整为 (输入, 缓存命中, 输出) 三元组；非法返回 None。
+
+    支持 [in, cached, out] 三元组或 [in, out] 二元组（缓存命中按 0 折）。
+    """
+    if not isinstance(v, (list, tuple)):
+        return None
+    try:
+        nums = [float(x) for x in v]
+    except (TypeError, ValueError):
+        return None
+    if len(nums) == 2:
+        nums = [nums[0], 0.0, nums[1]]
+    if len(nums) != 3 or any(n < 0 for n in nums):
+        return None
+    return (nums[0], nums[1], nums[2])
+
+
 def _price(provider: str, model: str):
+    """查单价：(输入未命中缓存, 输入命中缓存, 输出)，单位 ¥/百万 token。
+
+    优先级：免费供应商(0 元) > 用户自定义单价(llm_config.json 的 pricing 字段)
+    > 内置定价表 > 保守默认价。自定义 key 支持 "provider.model" 全名或裸
+    "model"（匹配当前 provider 时生效）；非法配置一律跳过回退，绝不因
+    手滑填错而中断计费。
+    """
     provider = (provider or "").strip()
     if provider in FREE_PROVIDERS:
         return (0.0, 0.0, 0.0)
+    custom = load_llm_config().get("pricing")
+    if isinstance(custom, dict):
+        for key in (f"{provider}.{model}", model):
+            if key in custom:
+                p = _as_price(custom[key])
+                if p is not None:
+                    return p
     return PRICING.get(f"{provider}.{model}", DEFAULT_PRICING)
 
 
@@ -126,6 +158,26 @@ def record(provider: str, model: str, prompt_tokens: int = 0,
                 days.pop(old, None)
         _save(data)
     return cost
+
+
+def price_info(provider: str, model: str) -> dict:
+    """返回当前生效的单价与来源（供前端展示「这个价是哪来的」）。
+
+    source: custom（用户自定义）/ builtin（内置定价表）/ free（本地或 Mock）
+    / default（未知模型按保守默认价估算）。
+    """
+    provider = (provider or "").strip()
+    if provider in FREE_PROVIDERS:
+        return {"source": "free", "price": [0.0, 0.0, 0.0]}
+    custom = load_llm_config().get("pricing")
+    if isinstance(custom, dict):
+        for key in (f"{provider}.{model}", model):
+            if key in custom and _as_price(custom[key]) is not None:
+                return {"source": "custom", "price": list(_as_price(custom[key]))}
+    full = f"{provider}.{model}"
+    if full in PRICING:
+        return {"source": "builtin", "price": list(PRICING[full])}
+    return {"source": "default", "price": list(DEFAULT_PRICING)}
 
 
 def budget_settings() -> tuple:
@@ -214,6 +266,7 @@ def summary() -> dict:
         "events": data["budget_events"][-10:],
         "provider": cfg.get("provider", ""),
         "model": cfg.get("model", ""),
+        "pricing": price_info(cfg.get("provider", ""), cfg.get("model", "")),
     }
 
 

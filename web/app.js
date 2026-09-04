@@ -1342,6 +1342,15 @@ const LLM_PRESETS = {
   local: { base_url: "", model: "" },
   custom: { base_url: "", model: "" },
 };
+let _llmPricing = {};   // 服务端 pricing 配置的本地副本（保存单价时整包提交）
+function fillPriceInputs(provider, model) {
+  const key = `${provider}.${model}`;
+  const v = _llmPricing[key] || _llmPricing[model];
+  const nums = Array.isArray(v) ? v : [];
+  $("#setPriceIn").value = nums[0] ?? "";
+  $("#setPriceCached").value = nums[1] ?? "";
+  $("#setPriceOut").value = nums[2] ?? "";
+}
 async function loadLlmConfig() {
   try {
     const cfg = await (await apiFetch("/llm/config")).json();
@@ -1354,6 +1363,8 @@ async function loadLlmConfig() {
     $("#setLlmLocalModel").value = cfg.local_model || "qwen2.5:7b";
     $("#setLlmKeyState").textContent = cfg.api_key_set ? "当前已配置" : "当前未配置";
     $("#setLlmKey").value = "";
+    _llmPricing = cfg.pricing && typeof cfg.pricing === "object" ? cfg.pricing : {};
+    fillPriceInputs(p, cfg.model || LLM_PRESETS[p].model);
     syncLlmProviderUI();
   } catch (e) {
     console.error("加载 LLM 配置失败", e);
@@ -1371,6 +1382,8 @@ function syncLlmProviderUI() {
     if (!$("#setLlmBase").value.trim()) $("#setLlmBase").value = preset.base_url;
     if (!$("#setLlmModel").value.trim()) $("#setLlmModel").value = preset.model;
   }
+  // 供应商/模型切换后，单价输入框展示对应模型的自定义值
+  fillPriceInputs(p, $("#setLlmModel").value.trim());
 }
 $("#setLlmProvider").onchange = syncLlmProviderUI;
 $("#setLlmSave").onclick = async () => {
@@ -1465,6 +1478,15 @@ async function loadLlmUsage() {
 
     $("#setBudgetLimit").value = b.daily_cny > 0 ? b.daily_cny : "";
     $("#setBudgetAction").value = b.action || "fallback";
+
+    // 单价来源提示（只更新文本，不碰输入框，避免 5 秒轮询覆盖正在输入的值）
+    const pr = d.pricing || {};
+    const SRC = { custom: "✏️ 自定义单价", builtin: "内置定价表", free: "本地模型（0 元）", default: "⚠️ 未知模型，按保守默认价估算" };
+    if (pr.source) {
+      const p3 = Array.isArray(pr.price) ? pr.price : [0, 0, 0];
+      $("#priceSourceText").textContent =
+        `当前计价（${d.provider} / ${d.model}）：${SRC[pr.source] || pr.source} — 输入 ¥${p3[0]} / 缓存命中 ¥${p3[1]} / 输出 ¥${p3[2]} 每百万 token`;
+    }
   } catch (e) {
     console.error("加载 LLM 用量失败", e);
   }
@@ -1516,6 +1538,29 @@ $("#setBudgetSave").onclick = async () => {
       alert("已关闭每日预算限制");
     }
   } catch (e) { alert("保存预算失败：" + e.message); }
+};
+
+$("#setPriceSave").onclick = async () => {
+  const provider = $("#setLlmProvider").value;
+  const model = $("#setLlmModel").value.trim();
+  if (!model) { alert("请先填写模型名，再保存单价"); return; }
+  const parse = id => { const n = parseFloat($("#" + id).value); return (isNaN(n) || n < 0) ? null : n; };
+  const pIn = parse("setPriceIn"), pCached = parse("setPriceCached"), pOut = parse("setPriceOut");
+  const filled = pIn !== null && pOut !== null;   // 输入/输出必填，缓存命中可缺省 0
+  // 整包提交：保留其他模型已配的自定义单价，只增删当前模型这一条
+  const pricing = { ..._llmPricing };
+  for (const k of Object.keys(pricing)) {
+    if (k === `${provider}.${model}` || k === model) delete pricing[k];
+  }
+  if (filled) pricing[`${provider}.${model}`] = [pIn, pCached ?? 0, pOut];
+  try {
+    const r = await apiFetch("/llm/config", { method: "POST", body: JSON.stringify({ provider, pricing }) });
+    if (!r.ok) { alert("保存失败：" + (await r.json()).detail); return; }
+    _llmPricing = pricing;
+    fillPriceInputs(provider, model);
+    await loadLlmUsage();
+    alert(filled ? `自定义单价已保存：${provider} / ${model}` : `已清除 ${model} 的自定义单价，恢复内置/默认计价`);
+  } catch (e) { alert("保存单价失败：" + e.message); }
 };
 
 $("#setBalanceQuery").onclick = async () => {

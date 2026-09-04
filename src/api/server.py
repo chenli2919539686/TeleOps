@@ -62,9 +62,9 @@ from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
-app = FastAPI(title="TeleOps 智能体平台", version="0.8.5")
+app = FastAPI(title="TeleOps 智能体平台", version="0.8.6")
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -198,6 +198,8 @@ class LLMConfig(BaseModel):
     llm_triage: bool = True         # 规则无结论时是否再走 LLM 语义降噪
     budget_daily_cny: float = 0.0   # 每日预算上限（元），0 表示不限制
     budget_action: str = "fallback" # warn | fallback | reject
+    # 自定义单价（¥/百万 token）：{"provider.model": [输入, 缓存命中, 输出]}
+    pricing: dict = {}
 
 
 LLM_PROVIDER_PRESETS = {

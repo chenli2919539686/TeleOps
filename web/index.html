@@ -6,7 +6,7 @@
   <title>TeleOps · 智能体平台</title>
   <link rel="icon" href="logo.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="styles.css?v=0.8.5" />
+  <link rel="stylesheet" href="styles.css?v=0.8.6" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -474,6 +474,14 @@
             </select>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <label style="font-size:13px;color:var(--text-dim)">自定义单价（¥/百万 token）</label>
+            <input id="setPriceIn" type="number" min="0" step="0.1" placeholder="输入" style="width:86px" title="输入单价（未命中缓存）" />
+            <input id="setPriceCached" type="number" min="0" step="0.1" placeholder="缓存命中" style="width:86px" title="输入单价（命中缓存，没有可填 0）" />
+            <input id="setPriceOut" type="number" min="0" step="0.1" placeholder="输出" style="width:86px" title="输出单价" />
+            <button class="ghost-btn sm" id="setPriceSave">保存单价</button>
+          </div>
+          <span id="priceSourceText" class="muted" style="font-size:12px"></span>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <span id="balanceText" class="muted" style="font-size:12px;flex:1">账户余额：未查询</span>
             <button class="ghost-btn sm" id="setBalanceQuery">查询余额</button>
           </div>
@@ -496,6 +504,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.5"></script>
+  <script src="app.js?v=0.8.6"></script>
 </body>
 </html>

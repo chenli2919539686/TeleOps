@@ -76,6 +76,8 @@ def load_llm_config() -> dict:
         "llm_triage": DEFAULT_LLM_TRIAGE,
         "budget_daily_cny": DEFAULT_BUDGET_DAILY_CNY,
         "budget_action": DEFAULT_BUDGET_ACTION,
+        # 自定义单价覆盖内置定价表：{"provider.model": [输入, 缓存命中, 输出]}
+        "pricing": {},
     }
     try:
         if LLM_CONFIG_FILE.exists():
