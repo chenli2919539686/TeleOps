@@ -32,7 +32,8 @@ class DevAgent:
             f"你是研发数字员工。根据运维反馈生成一个新的运维探测工具。\n"
             f"反馈: {summary}\n"
             f"输出 JSON: {{name, description, risk, params, code}}，"
-            f"code 必须是合法 Python，定义 def run(params: dict) 返回 dict。"
+            f"code 必须是合法 Python，定义 def run(params: dict) 返回 dict，"
+            f"整体代码控制在 30 行以内、只做探测与返回结果，不要额外依赖。"
         )
         raw = self.llm.complete(prompt)
         data = extract_json(raw)
@@ -69,23 +70,41 @@ class DevAgent:
         return self.llm.complete(prompt)
 
     # ---------- 3. 沉淀 SOP 进知识库 ----------
-    def write_sop(self, feedback: dict, tool: dict) -> str:
+    def _gen_sop_text(self, feedback: dict, tool_name: str) -> str:
+        """只生成 SOP 文本（可与造工具并行，工具名取自反馈中的预期名）。"""
         summary = feedback.get("summary", "")
         prompt = (
             "[TASK:SOP]\n"
-            f"根据运维反馈与已生成工具 {tool.get('name')}，写一份故障处置 SOP（Markdown）。\n"
+            f"根据运维反馈与已生成工具 {tool_name}，写一份故障处置 SOP（Markdown）。"
+            f"全文控制在 600 字以内：只保留现象、排查步骤（编号列表）、升级条件三节。\n"
             f"反馈: {summary}"
         )
-        text = self.llm.complete(prompt)
-        # 写入 kb/ 供检索
+        return self.llm.complete(prompt)
+
+    def _write_sop_file(self, sop_text: str, tool_name: str) -> str:
         KB_DIR.mkdir(exist_ok=True)
-        sop_path = KB_DIR / f"sop_{tool.get('name', 'auto')}.md"
-        sop_path.write_text(text, encoding="utf-8")
+        sop_path = KB_DIR / f"sop_{tool_name or 'auto'}.md"
+        sop_path.write_text(sop_text, encoding="utf-8")
         return str(sop_path)
+
+    def write_sop(self, feedback: dict, tool: dict) -> str:
+        """兼容入口：串行生成 + 落盘（新链路走 _gen_sop_text 并行版）。"""
+        return self._write_sop_file(
+            self._gen_sop_text(feedback, tool.get("name", "auto")),
+            tool.get("name", "auto"))
 
     # ---------- 对外：消费一条反馈，端到端产出工具+知识 ----------
     def fulfill_feedback(self, feedback: dict) -> dict:
-        tool = self.generate_tool(feedback)
+        # 造工具与写 SOP 并行：两次 LLM 调用互不依赖，SOP 用反馈中预期的
+        # 工具名（派发层 raise_requirement 已明确 needed_tool），省一半等待。
+        m = re.search(r"工具\s+([A-Za-z_][A-Za-z0-9_]*)", feedback.get("summary", ""))
+        expected = m.group(1) if m else "auto"
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_tool = ex.submit(self.generate_tool, feedback)
+            f_sop = ex.submit(self._gen_sop_text, feedback, expected)
+            tool = f_tool.result()
+            sop_text = f_sop.result()
         self.register_tool(tool)
-        sop_path = self.write_sop(feedback, tool)
+        sop_path = self._write_sop_file(sop_text, tool.get("name"))
         return {"feedback_id": feedback.get("feedback_id"), "tool": tool, "sop": sop_path}

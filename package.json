@@ -1,6 +1,6 @@
 {
   "name": "teleops",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "TeleOps 智能体平台：研发数字员工 × 运维 Agent 纵向闭环",
   "private": true,
   "scripts": {

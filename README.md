@@ -209,6 +209,12 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.2 · 闭环链路提速（真实 LLM 下首遇告警 34s → 约 10s）**
+- **造工具与写 SOP 并行**：`DevAgent.fulfill_feedback` 用线程池并发跑 CODEGEN 与 SOP 生成（SOP 工具名取派发需求中的 `needed_tool`），两次 LLM 调用从串行 28s 缩到取最大值约 14s；提示词同时要求精简输出（工具代码 30 行内、SOP 600 字内）进一步压缩生成时间。
+- **round2 复用首轮诊断**：`raise_requirement` 把完整根因诊断随需求落库；`dispatch_to_ops` 回派时新增 `OpsAgent.redrive`——跳过重复的降噪 + 根因推理（约 7s），只重跑工具执行验证复用生效；旧需求无诊断时自动回退完整 `handle_alert`。
+- **LLM 降噪结果缓存**：相同内容的告警（剧本循环重放）命中缓存直接返回，第二轮起不再重复调用降噪 LLM。
+- 实测（DeepSeek 真实调用）：story 剧本首遇告警 34s → 8~16s，复用告警 3~5s，噪声规则层 0ms；75 秒内跑完 2 轮 16 条（6 造工具 + 2 复用 + 8 抑制），errors=0；pytest 61 项全绿。
+
 **v0.8.1 · 告警流进作战室：实时任务队列**
 - **任务队列模型**：在 `src/core/alert_stream.py` 中新增 task 生命周期（`queued → processing → done/suppressed/escalated/closed`），每条非噪声告警作为一个任务自动分配给流水线归属的运维 Agent；任务状态随处置过程实时收敛，并暴露 `GET /stream/tasks?limit=N&agent_id=` 供作战室轮询。
 - **作战室实时联动**：Agent 卡片下方新增「当前任务」行，显示该 Agent 正在处理的告警（如 `A-TEMP @ host-1 处置中`）；作战室新增「实时任务队列」区块，展示任务 ID、告警、主机、分配 Agent、状态徽章、闭环徽章（造工具 / 复用 / 已抑制）。状态与后端 `registry.status` 同步刷新，流水线停止后状态立即显示「未运行」。

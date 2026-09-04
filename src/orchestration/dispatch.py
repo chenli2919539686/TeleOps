@@ -29,6 +29,8 @@ def raise_requirement(board, registry, alert, out, source_ops_agent_id, mode="au
         "alert": alert,
         "tags": alert.get("tags", []),
         "needed_tool": needed,
+        # 完整诊断随需求保存：回派第二轮直接复用，不再重复降噪+根因推理
+        "diagnosis": diag,
         "mode": mode,
         "workspace_id": workspace_id,
         "status": "pending",
@@ -85,7 +87,13 @@ def dispatch_to_ops(board, registry, req_id, ops_agent_id=None, mode=None):
     registry.set_status(ops_id, "busy")
     _log(req, "dispatch_ops",
          f"派发运维 Agent {ops_meta['name']} 用新工具 {req.get('created_tool_name')} 重新处置")
-    out = ops.handle_alert(req["alert"])
+    # 第二轮优先复用首轮诊断（省两次 LLM 调用），只重跑工具执行；
+    # 旧需求没存诊断时回退完整 handle_alert，保持兼容。
+    diagnosis = req.get("diagnosis") or {}
+    if diagnosis.get("hypotheses"):
+        out = ops.redrive(req["alert"], diagnosis)
+    else:
+        out = ops.handle_alert(req["alert"])
     board.update(req_id,
                  status="done",
                  target_ops_agent_id=ops_id,

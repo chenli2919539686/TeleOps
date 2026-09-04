@@ -14,6 +14,16 @@ from src.llm_client import extract_json
 from src import config
 from src.triage_rules import rule_triage
 
+# LLM 二次降噪结果缓存：相同告警内容（剧本循环重放场景）不重复消耗 token。
+# key = (alert_id, host, severity, message)，value = is_noise；容量有界防膨胀。
+_TRIAGE_CACHE: dict = {}
+_TRIAGE_CACHE_MAX = 256
+
+
+def _triage_cache_key(alert: dict):
+    return (alert.get("alert_id", ""), alert.get("host", ""),
+            alert.get("severity", ""), str(alert.get("message", "")))
+
 
 class OpsAgent:
     def __init__(self, cmdb, kb, tools, llm):
@@ -34,9 +44,13 @@ class OpsAgent:
     def _llm_triage(self, alert: dict) -> bool:
         """二次降噪：规则无结论时，让 LLM 做一次语义判定。
 
-        仅在 _rule_triage 返回 None 时调用，避免每条告警都消耗 token。
+        仅在 _rule_triage 返回 None 时调用，避免每条告警都消耗 token；
+        相同内容的告警（剧本循环重放）命中缓存直接返回，不再重复调用。
         解析失败时保守按「非噪声」处理——漏判比错杀安全。
         """
+        key = _triage_cache_key(alert)
+        if key in _TRIAGE_CACHE:
+            return _TRIAGE_CACHE[key]
         prompt = (
             "[TASK:TRIAGE]\n"
             "你是运维告警分级专家。判断下列告警是否值得人工处理："
@@ -51,7 +65,11 @@ class OpsAgent:
             return False
         if not isinstance(data, dict):
             return False
-        return bool(data.get("is_noise", False))
+        verdict = bool(data.get("is_noise", False))
+        if len(_TRIAGE_CACHE) >= _TRIAGE_CACHE_MAX:
+            _TRIAGE_CACHE.clear()  # 演示场景直接整清，避免 LRU 复杂度
+        _TRIAGE_CACHE[key] = verdict
+        return verdict
 
     def normalize(self, alert: dict) -> dict:
         """分层降噪：规则快判 → 无结论才交给 LLM 语义判定。"""
@@ -157,3 +175,18 @@ class OpsAgent:
         plan = self.build_plan(diag, tr)
         return {"alert": alert, "normalized": norm, "is_noise": False,
                 "diagnosis": diag, "tool_results": tr, "missing_tool": missing, "plan": plan}
+
+    def redrive(self, alert: dict, diagnosis: dict) -> dict:
+        """第二轮处置：复用首轮诊断结论，只重跑「工具执行 + 汇总」。
+
+        首轮已确认告警非噪声且拿到根因假设；工具造好后回派时，重复跑
+        降噪 + 根因推理是纯浪费（两次 LLM 调用）。此处直接用新工具
+        重新执行诊断建议的探测，验证闭环生效。
+        """
+        tr = self.run_recommended_tools(diagnosis)
+        missing = self.detect_missing_tool(diagnosis)
+        plan = self.build_plan(diagnosis, tr)
+        return {"alert": alert, "normalized": {**alert, "is_noise": False, "normalized": True,
+                                               "triage_by": "round1_reuse"},
+                "is_noise": False, "diagnosis": diagnosis,
+                "tool_results": tr, "missing_tool": missing, "plan": plan}
