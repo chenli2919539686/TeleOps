@@ -51,6 +51,7 @@ from src.core import db
 from src.core import auth
 from src.core import metrics
 from src.core import rate_limit as rl
+from src.core.alert_stream import AlertStream, build_playlist
 from src.llm_client import LLMClient
 from src.agents.ops_agent import OpsAgent
 from src.agents.dev_agent import DevAgent
@@ -58,9 +59,9 @@ from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
-app = FastAPI(title="TeleOps 智能体平台", version="0.7.5")
+app = FastAPI(title="TeleOps 智能体平台", version="0.8.0")
 
-VERSION = "0.7.5"
+VERSION = "0.8.0"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -144,7 +145,8 @@ app.add_middleware(_MetricsMiddleware)
 _STATIC_SUFFIXES = (".css", ".js", ".ico", ".png", ".svg", ".jpg", ".jpeg",
                     ".gif", ".woff", ".woff2", ".ttf", ".map", ".html")
 _LOW_FREQ_PATHS = {"/", "/metrics", "/health", "/health/ready", "/api/info",
-                   "/docs", "/openapi.json", "/redoc"}
+                   "/docs", "/openapi.json", "/redoc",
+                   "/stream/status", "/stream/feed"}  # 演示流状态轮询不计读额度
 
 
 class _RateLimitMiddleware(BaseHTTPMiddleware):
@@ -200,6 +202,7 @@ registry.ws_store = ws_store   # 让 registry.set_status 能持久化到 SQLite
 board = RequirementBoard()
 dispatch_mode = {"value": "auto"}   # 自动 / 手动，可经 /dispatch/mode 切换
 adapters = AdapterRegistry()        # 外部系统适配器注册表（含预留接口）
+stream = AlertStream()              # 模拟告警流水线（持续监控演示），处置回调在 start 时注入
 
 
 # ---------------- 异步任务（让 Agent 运行时 busy 态可被前端实时轮询看到） ----------------
@@ -384,6 +387,16 @@ class AdapterAlertIngestReq(BaseModel):
     payload: Dict[str, Any] = {}
     ops_agent_id: Optional[str] = None
     workspace_id: Optional[str] = None   # 绑定业务域，状态灯按域联动
+
+
+class StreamStartReq(BaseModel):
+    """模拟告警流水线启动参数（持续监控演示，处置链路与 webhook 接入一致）。"""
+    profile: str = "mixed"             # mixed=样本为主穿插故障 | story=故障剧本短循环
+    interval_ms: int = 1200            # 播放节拍（毫秒，实际受单条处置耗时上浮）
+    loop: bool = True                  # 播完自动循环（工具沉淀后同类故障直接复用）
+    workspace_id: Optional[str] = None # 绑定业务域：状态灯联动该域运维 Agent
+    ops_agent_id: Optional[str] = None # 指定运维 Agent（不填取该域主 Agent）
+    mode: Optional[str] = None         # auto|manual，覆盖业务域派发模式（不填跟随域）
 
 
 # ---------------- 端点 ----------------
@@ -737,6 +750,153 @@ def get_job(job_id: str):
     """轮询异步任务进度（前端据此让作战室状态灯实时刷新）。"""
     _gc_jobs()   # 顺带清理过期任务，避免内存泄漏
     return _jobs.get(job_id, {"status": "not_found"})
+
+
+# ---------------- 模拟告警流水线（持续监控演示，处置链路与 webhook 接入一致） ----------------
+def _stream_resolve_ctx(ws_id, ops_agent_id, mode):
+    """解析流水线处置上下文：选运维 Agent + 定派发模式（跟随域 / 显式覆盖）。"""
+    ops_id = ops_agent_id or (_ws_primary_ops(ws_id) if ws_id else registry.primary("ops"))
+    if not mode:
+        ws_meta = ws_store.get(ws_id) if ws_id else None
+        mode = ws_meta["mode"] if ws_meta else dispatch_mode["value"]
+    return ops_id, mode
+
+
+def _stream_make_processor(ws_id, ops_id, mode):
+    """单条告警处置回调：降噪 → 根因 → 工具 →（缺工具自动登记并走研发闭环）。
+
+    与 webhook 接入（_ingest_flow）唯一的差别是输入来源：这里来自流水线剧本，
+    后续接真实告警推送时可直接复用本函数。
+    """
+    def process(alert: dict) -> dict:
+        inst = registry.get_instance(ops_id)
+        entry = {"noise": False, "summary": "", "missing_tool": "",
+                 "loop": "none", "tool_name": "", "error": ""}
+        if not inst:
+            entry["error"] = f"ops agent {ops_id} 不存在"
+            return entry
+        registry.set_status(ops_id, "busy")
+        try:
+            out = inst.handle_alert(alert)
+        except Exception as e:
+            entry["error"] = f"{type(e).__name__}: {e}"
+            entry["summary"] = "处置异常，已跳过（不打断流水线）"
+            return entry
+        finally:
+            registry.set_status(ops_id, "idle")
+        norm = out.get("normalized") or {}
+        entry["noise"] = bool(norm.get("is_noise"))
+        entry["triage_by"] = norm.get("triage_by") or ""
+        diag = out.get("diagnosis") or {}
+        hyps = diag.get("hypotheses") or []
+        cause = (hyps[0] or {}).get("cause", "") if hyps else ""
+        concl = diag.get("conclusion", "") or ""
+        if entry["noise"]:
+            entry["summary"] = "噪声告警，已由降噪层抑制，不打扰处置队列"
+            return entry
+        entry["hypothesis"] = cause or concl
+        missing = out.get("missing_tool") or ""
+        entry["missing_tool"] = missing
+        # 根因推荐的工具（含已存在库中、可直接调用的）
+        rec_tools = [h.get("recommended_tool") for h in hyps if h.get("recommended_tool")]
+        if not missing:
+            # 若推荐工具正是本场流水线此前造出来的沉淀 → 标为「复用」，叙事直白
+            rec = next((t for t in rec_tools if t in created_pool), "")
+            if rec:
+                entry["loop"] = "reused"
+                entry["tool_name"] = rec
+                entry["summary"] = (f"同类故障再现 → 复用本轮沉淀的 {rec} "
+                                    "直接探测，无需研发介入")
+            else:
+                entry["summary"] = (f"真实故障 → 根因：{cause or concl or '已定位'}；"
+                                    "已有工具处置")
+            return entry
+        # 工具缺口 → 复用登记/派发流程（_raise_flow 传入 out，避免重复诊断）
+        try:
+            rr = _raise_flow(ops_id, alert, mode, ws_id, out=out)
+        except Exception as e:
+            entry["error"] = f"{type(e).__name__}: {e}"
+            entry["summary"] = f"缺口 {missing} 派发异常"
+            return entry
+        if rr.get("reusable"):
+            entry["loop"] = "reused"
+            entry["tool_name"] = rr.get("tool") or missing
+            entry["summary"] = (f"检测到缺口工具 {missing}，但工具库已有沉淀 → "
+                                "直接复用，无需研发重复造")
+        elif rr.get("requirement"):
+            req = rr["requirement"]
+            entry["tool_name"] = req.get("created_tool_name") or missing
+            if req.get("status") == "done":
+                entry["loop"] = "created"
+                created_pool.add(entry["tool_name"])
+                entry["summary"] = (f"缺口 {missing} → 研发造出 {entry['tool_name']} "
+                                    "并注册 → 运维已复用重新处置（闭环达成）")
+            else:
+                entry["loop"] = "pending"
+                entry["summary"] = (f"缺口 {missing} 已登记消息栏"
+                                    f"（{req.get('status')}），等待派发研发")
+        else:
+            entry["summary"] = f"缺口 {missing} 登记未成功：{rr.get('error') or '未知'}"
+            entry["error"] = rr.get("error") or ""
+        return entry
+    created_pool = set()   # 本场流水线造出的工具（用于给后续「复用」打标）
+    return process
+
+
+@app.post("/stream/start")
+def stream_start(req: StreamStartReq):
+    """启动模拟告警流水线：自动循环播放剧本，Agent 持续处置不停摆。"""
+    if stream.running:
+        raise HTTPException(status_code=409,
+                            detail="告警流已在运行，请先停止（/stream/stop）再启动")
+    if req.profile not in ("mixed", "story"):
+        raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
+    if req.mode and req.mode not in ("auto", "manual"):
+        raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
+    data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+    playlist = build_playlist(data.get("alerts", []), profile=req.profile)
+    if not playlist:
+        raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
+    ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
+    stream._process = _stream_make_processor(req.workspace_id, ops_id, mode)
+    stream.start(playlist, profile=req.profile,
+                 interval_ms=req.interval_ms, loop=req.loop)
+    return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
+            "mode": mode, "playlist_len": len(playlist), "detail": stream.status()}
+
+
+@app.post("/stream/stop")
+def stream_stop():
+    """停止流水线（幂等），返回最终统计。"""
+    stream.stop()
+    return {"status": "stopped", "detail": stream.status()}
+
+
+@app.post("/stream/reset-demo")
+def stream_reset_demo():
+    """重置演示数据：清掉流内沉淀的工具，让「缺工具→造工具」可反复重演。
+
+    只删除「全局工具库」里非内置（保留 ping_host / restart_service）的工具行，
+    不动各业务域自有工具与消息栏历史。
+    """
+    stream.stop()
+    db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
+               "AND (workspace_id IS NULL OR workspace_id='')")
+    return {"status": "reset",
+            "tools": [r["name"] for r in db.query(
+                "SELECT name FROM tools ORDER BY name")]}
+
+
+@app.get("/stream/status")
+def stream_status():
+    """流水线运行状态 + 累计统计（前端秒级轮询）。"""
+    return stream.status()
+
+
+@app.get("/stream/feed")
+def stream_feed(after: int = 0):
+    """增量拉取处置流水（seq > after），供前端像监控大屏一样滚动渲染。"""
+    return {"items": stream.feed(after=after)}
 
 
 # ---------------- 多 Agent 矩阵 + 消息栏（人工 / 自动派发闭环） ----------------

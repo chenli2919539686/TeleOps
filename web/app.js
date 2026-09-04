@@ -66,6 +66,7 @@ $$(".nav-item").forEach((btn) => {
     if (v === "board") renderBoard();
     if (v === "integ") renderIntegrations();
     if (v === "overview") loadOverview();
+    if (v === "stream") streamEnter();
   });
 });
 
@@ -252,6 +253,210 @@ $("#loopRun").addEventListener("click", async () => {
 $("#loopReset").addEventListener("click", () => {
   $("#loopResult").innerHTML = `<div class="empty">重置说明：删除 <code>tools/optical_power_probe.py</code>、<code>tools/temperature_probe.py</code> 并清理 <code>data/tools.json</code> 中对应条目后，再跑闭环即可重演"造工具"全过程。<br>（也可直接重新克隆仓库首次运行）</div>`;
 });
+
+// ================= 实时告警流（持续监控演示面板） =================
+// 后端 AlertStream 单例：剧本队列按节拍播放 → 运维逐条降噪/根因/处置 →
+// 缺口自动派研发造工具 → 后续同类故障复用沉淀。前端秒级轮询 status + 增量 feed。
+const STREAM = { inited: false, seen: 0, started: false, tick: null, ops: "", mode: "auto", profile: "", wsName: "全局" };
+
+function streamSegVal(segId) {
+  const el = document.querySelector(`#${segId} .seg-btn.active`);
+  return el ? (el.dataset.p || el.dataset.m || el.dataset.t) : null;
+}
+function streamSegPick(segId) {
+  document.querySelectorAll(`#${segId} .seg-btn`).forEach(b => {
+    b.onclick = () => {
+      document.querySelectorAll(`#${segId} .seg-btn`).forEach(x => x.classList.toggle("active", x === b));
+    };
+  });
+}
+["streamProfileSeg", "streamModeSeg", "streamTickSeg"].forEach(streamSegPick);
+
+function fmtUptime(s) {
+  if (!(s > 0)) return "00:00";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  return (h ? String(h).padStart(2, "0") + ":" : "") + String(m).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
+}
+function streamProfileLabel(p) {
+  return p === "story" ? "story · 聚焦闭环" : "mixed · 样本为主";
+}
+
+function ensureStreamStats() {
+  const box = $("#streamStats");
+  if (box.children.length) return;
+  const defs = [
+    ["ingested", "已接入", "dim"], ["noise", "噪声抑制", "dim"],
+    ["real", "真实处置", "coral"], ["created", "闭环造工具", "prime"],
+    ["reused", "复用沉淀", "ok"], ["pending", "待派发", "warn"],
+    ["errors", "错误", "coral"], ["uptime", "已运行", "cy"],
+  ];
+  box.innerHTML = defs.map(d => `<div class="ss-card"><div class="ss-num ${d[2]}" data-k="${d[0]}">0</div><div class="ss-lbl">${d[1]}</div></div>`).join("");
+}
+function setStreamStat(k, v) {
+  const el = document.querySelector(`#streamStats .ss-num[data-k="${k}"]`);
+  if (el) el.textContent = v;
+}
+function renderStreamStats(s) {
+  ensureStreamStats();
+  const st = s.stats || {};
+  setStreamStat("ingested", st.ingested ?? 0);
+  setStreamStat("noise", st.noise ?? 0);
+  setStreamStat("real", st.real ?? 0);
+  setStreamStat("created", st.created ?? 0);
+  setStreamStat("reused", st.reused ?? 0);
+  setStreamStat("pending", st.pending ?? 0);
+  setStreamStat("errors", st.errors ?? 0);
+  setStreamStat("uptime", fmtUptime(s.uptime_s || 0));
+}
+
+function renderStreamLivebar(s) {
+  const pill = document.querySelector("#streamLivebar .live-pill");
+  if (pill) {
+    pill.className = "live-pill " + (s.running ? "live" : "idle");
+    const txt = $("#liveTxt");
+    txt.textContent = s.running ? "LIVE 运行中" : (STREAM.started ? "已停止" : "未运行");
+  }
+  const meta = $("#liveMeta");
+  if (meta) {
+    const modeTxt = s.mode === "manual" ? "✋ 手动" : (s.running || STREAM.started ? "⚡ 自动" : "—");
+    meta.innerHTML = `<b>${escapeHtml(STREAM.profile || streamProfileLabel(s.profile || "story"))}</b>` +
+      ` · 域 <b>${escapeHtml(STREAM.wsName)}</b> · 处置 <code>${escapeHtml(STREAM.ops || s.ops_agent_id || "自动路由")}</code>` +
+      ` · ${modeTxt} · 间隔 ${s.interval_ms || 1200}ms · 轮次 ${s.rounds || 0}` +
+      ` · 剩余 ${s.queue_remaining ?? 0} 条`;
+  }
+  const cur = $("#liveCurrent");
+  if (cur) {
+    const c = s.current;
+    if (s.running && c) {
+      const sev = c.severity === "critical" ? "🚨" : c.severity === "major" ? "⚠️" : "ℹ️";
+      cur.innerHTML = `<span class="spin">⟳</span> 正在处置 ${sev} <code>${escapeHtml(c.alert_id)}</code> · ${escapeHtml(c.metric)} @ ${escapeHtml(c.host)}`;
+    } else if (s.running) {
+      cur.innerHTML = `<span class="spin">⟳</span> 等待下一条告警…`;
+    } else {
+      cur.innerHTML = "";
+    }
+  }
+  const err = $("#liveErr");
+  if (err) {
+    if (s.last_error) err.textContent = "⚠ " + s.last_error;
+    else err.textContent = "";
+  }
+}
+
+function clearStreamFeed(emptyHtml) {
+  const box = $("#streamFeed");
+  box.innerHTML = `<div class="empty">${emptyHtml || "流水线未启动。"}</div>`;
+}
+function appendStreamRow(it) {
+  const box = $("#streamFeed");
+  const empty = box.querySelector(":scope > .empty");
+  if (empty) empty.remove();
+  const a = it.alert || {};
+  const sev = a.severity === "critical" ? "🚨" : a.severity === "major" ? "⚠️" : "ℹ️";
+  const verdict = it.noise
+    ? `<span class="sf-badge noise">🔕 噪声</span>`
+    : `<span class="sf-badge real">🚨 真实</span>`;
+  const tri = `<span class="sf-badge ${it.triage_by === "rule" ? "rule" : "llm"}">${it.triage_by === "rule" ? "规则" : "LLM"}</span>`;
+  const loop = it.loop === "created" ? `<span class="sf-badge created">🛠 造工具</span>`
+    : it.loop === "reused" ? `<span class="sf-badge reused">♻ 复用</span>`
+    : it.loop === "pending" ? `<span class="sf-badge pending">📥 待派发</span>`
+    : `<span class="sf-badge loop-none">—</span>`;
+  const row = document.createElement("div");
+  row.className = "sf-row" + (it.error ? " row-err" : "");
+  const at = String(it.at || "").slice(11, 19);
+  const sum = it.error ? (it.summary || it.error) : (it.summary || "已处置");
+  row.innerHTML =
+    `<span class="sf-time">${escapeHtml(at)}</span>` +
+    `<span class="sf-seq">#${it.seq ?? ""}</span>` +
+    verdict + tri +
+    `<span class="sf-alert"><span class="a-id">${sev} ${escapeHtml(a.alert_id || "?")}</span>` +
+      `<span class="sf-sev">${escapeHtml(a.severity || "")}</span>` +
+      `<div class="a-sub">${escapeHtml(a.metric || "")} @ ${escapeHtml(a.host || "")}</div></span>` +
+    `<span class="sf-sum">${escapeHtml(sum)}</span>` +
+    loop +
+    `<span class="sf-dur">${it.duration_ms != null ? it.duration_ms + "ms" : ""}</span>`;
+  box.appendChild(row);
+  while (box.children.length > 220) box.removeChild(box.firstChild);   // 只保留最近 220 条，防 DOM 膨胀
+  box.scrollTop = box.scrollHeight;
+}
+
+async function streamPoll() {
+  const view = document.getElementById("view-stream");
+  if (!view || !view.classList.contains("active")) return;
+  try {
+    const s = await (await apiFetch(`/stream/status`)).json();
+    const st = s.stats || {};
+    renderStreamStats(s);
+    renderStreamLivebar(s);
+    // 长时间离开页面后回流补齐（环形缓冲 300，最多可重放 250 条差额）
+    if (s.running && st.ingested - STREAM.seen > 250) { STREAM.seen = 0; clearStreamFeed("正在追赶最近 300 条处置流水…"); }
+    const f = await (await apiFetch(`/stream/feed?after=${STREAM.seen}`)).json();
+    const items = f.items || [];
+    if (items.length) {
+      STREAM.seen = Math.max(...items.map(i => i.seq));
+      items.forEach(appendStreamRow);
+    }
+    if (!s.running && !STREAM.started && !st.ingested) {
+      // 从未运行过：保持空态文案（stats 仍可展示）
+    }
+  } catch (e) { /* 后端暂不可达：静默，健康灯会提示 */ }
+}
+function streamEnter() {
+  if (!STREAM.inited) { STREAM.inited = true; clearStreamFeed(); }
+  if (!STREAM.tick) STREAM.tick = setInterval(streamPoll, 1200);
+  streamPoll();
+}
+
+// ---- 控制：启动 / 停止 / 重置 ----
+$("#streamStart").onclick = async () => {
+  const btn = $("#streamStart");
+  btn.disabled = true;
+  try {
+    const profile = streamSegVal("streamProfileSeg") || "story";
+    const mode = streamSegVal("streamModeSeg") || "auto";
+    const interval = parseInt(streamSegVal("streamTickSeg") || "1200", 10);
+    const body = { profile, mode, interval_ms: interval, loop: true, workspace_id: CURRENT_WS || null };
+    const r = await apiFetch(`/stream/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+    STREAM.ops = d.ops_agent_id || "";
+    STREAM.mode = d.mode || mode;
+    STREAM.profile = d.profile || profile;
+    const ws = WS_LIST.find(w => w.id === CURRENT_WS);
+    STREAM.wsName = ws ? ws.name : "全局";
+    STREAM.started = true;
+    STREAM.seen = 0;
+    clearStreamFeed("🚀 流水线已启动，等待首条告警处置完成…");
+    $("#streamStop").disabled = false;
+    $("#streamReset").disabled = true;
+    streamPoll();
+  } catch (e) {
+    alert("启动失败：" + e.message);
+    $("#streamReset").disabled = false;
+  } finally { btn.disabled = false; }
+};
+
+$("#streamStop").onclick = async () => {
+  try {
+    await apiFetch(`/stream/stop`, { method: "POST" });
+    $("#streamStop").disabled = true;
+    $("#streamReset").disabled = false;
+    $("#liveTxt").textContent = "已停止";
+  } catch (e) { alert("停止失败：" + e.message); }
+};
+
+$("#streamReset").onclick = async () => {
+  try {
+    const r = await apiFetch(`/stream/reset-demo`, { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+    const names = (d.tools || []).join(", ") || "（空）";
+    const errEl = $("#liveErr");
+    if (errEl) { errEl.style.color = "var(--ok)"; errEl.textContent = "↺ 已重置：工具库回到 → " + names; setTimeout(() => { errEl.style.color = ""; }, 6000); }
+    $("#streamStart").disabled = false;
+    $("#streamStop").disabled = true;
+  } catch (e) { alert("重置失败：" + e.message); }
+};
 
 // ---------- 拓扑 ----------
 async function renderTopo() {

@@ -22,23 +22,23 @@
 
 ![TeleOps 架构](docs/architecture.svg)
 
-> **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 8 视图经 FastAPI 同源托管，多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
+> **一加二闭环**：运维 Agent 识别「缺工具」→ 派发研发 Agent 造工具并写 SOP → 派回运维复用；工具库 / 知识库双向沉淀，告警源经接入层统一收口。前端 9 视图经 FastAPI 同源托管（新增 **实时告警流** 监控大屏，让 Agent 持续降噪/根因/处置并自动演示沉淀→复用），多租户按 `workspace_id` 逻辑隔离，CI/CD 与 DeepSeek 真实 LLM 已接入（无 Key 自动 Mock 兜底）。
 
 ## 界面演示
 
 以下截图均由本地后端（`127.0.0.1:8000`）真实渲染，通过 `scripts/capture_shots.js`（playwright-core + 系统 Edge）自动捕获，可直接用于面试/答辩演示。
 
-| Agent 作战室 | 闭环看板 |
-|---|---|
-| ![作战室](docs/shots/overview.png) | ![闭环看板](docs/shots/loop.png) |
-| **消息栏需求看板** | **接入层** |
-| ![消息栏](docs/shots/board.png) | ![接入层](docs/shots/integ.png) |
-| **拓扑视图** | **工具库** |
-| ![拓扑](docs/shots/topo.png) | ![工具库](docs/shots/tools.png) |
-| **知识库** | **Agent 工作台（含告警样本库）** |
-| ![知识库](docs/shots/kb.png) | ![工作台](docs/shots/workbench.png) |
+| Agent 作战室 | 实时告警流 | 闭环看板 |
+|---|---|---|
+| ![作战室](docs/shots/overview.png) | ![实时告警流](docs/shots/stream.png) | ![闭环看板](docs/shots/loop.png) |
+| **消息栏需求看板** | **接入层** | **拓扑视图** |
+| ![消息栏](docs/shots/board.png) | ![接入层](docs/shots/integ.png) | ![拓扑](docs/shots/topo.png) |
+| **工具库** | **知识库** | **Agent 工作台（含告警样本库）** |
+| ![工具库](docs/shots/tools.png) | ![知识库](docs/shots/kb.png) | ![工作台](docs/shots/workbench.png) |
 
 工作台中的 📚 **真实机群告警样本** 直接来自 `data/alerts.json`（55 条 BlueGene/L 真实事件，3 严重 / 52 噪声），点击任意条目即可填入左侧 JSON 框，一键触发根因分析；若发现工具缺口，底部会自动出现「登记并派发研发」按钮，进入一加二闭环。
+
+实时告警流把静态样本变成一条「时间轴告警流」：后端 `src/core/alert_stream.py` 按节拍持续推送 55 条真实机群告警 + 故障剧本，运维 Agent 逐条走「规则降噪 → LLM 二次降噪 → 根因推理 → 工具处置 → 缺工具则自动登记并派发研发造工具 → 后续同类故障直接复用沉淀」；处置链路与接入层 webhook 完全一致，后续替换成真实告警推送即可。
 
 ## 目录结构
 ```
@@ -66,7 +66,8 @@ TeleOps/
 │   │   ├── tool_registry.py  # 工具库 registry（动态加载 + 风险分级）
 │   │   ├── kb_store.py       # 知识库（Chroma 优先，纯 JSON 检索兜底）
 │   │   ├── agent_registry.py # 多 Agent 注册表（2 运维 + 2 研发，按 scope 路由）
-│   │   └── requirement_board.py # 消息栏需求看板（工具缺口需求 + 状态机，落盘）
+│   │   ├── requirement_board.py # 消息栏需求看板（工具缺口需求 + 状态机，落盘）
+│   │   └── alert_stream.py   # 模拟告警流水线：持续告警流 + 处置闭环 + feed 缓冲
 │   ├── agents/
 │   │   ├── ops_agent.py      # 运维 Agent：降噪 + 根因推理 + 工具调用 + 处置建议
 │   │   └── dev_agent.py      # 研发 Agent：CodeGen 造工具 + 注册 + 变更单 + SOP 沉淀
@@ -80,16 +81,18 @@ TeleOps/
 │   │   └── registry.py       # 适配器注册表（统一注册/查询/调用）
 │   └── api/
 │       └── server.py         # FastAPI 后端（/agents /dispatch /requirements /adapters /metrics /health* 等）
-├── web/                      # 主界面：原生 HTML/CSS/JS 动态前端（8 视图，FastAPI 同源托管 /）
+├── web/                      # 主界面：原生 HTML/CSS/JS 动态前端（9 视图，FastAPI 同源托管 /，含实时告警流）
 ├── tools/                    # 研发数字员工产出的小工具（示例 + 自动生成）
 ├── scripts/
 │   ├── gen_data.py           # 一键造【自造】数据：拓扑/工具/反馈
 │   ├── ingest_public.py      # 接入【真实公开】数据：日志->alerts、生成公开知识库
 │   ├── reset_demo.py         # 重置演示数据（清自动生成工具 + 清空消息栏）
 │   ├── build_hf_space.py     # 打包 HF Space 运行快照（剔除演示重依赖）
+│   ├── demo_stream.py          # 模拟告警流水线 CLI（无 UI 场景 / 录屏 / CI）
 │   ├── test_jwt_e2e.py       # JWT 端到端验证（12 项断言）
 │   ├── verify_project.py     # 项目级验证（14 项）
-│   └── capture_shots.js      # 自动截图：后端启动后用 Edge 捕获前端 7 视图 + 工作台
+│   ├── capture_shots.js      # 自动截图：后端启动后用 Edge 捕获前端 7 视图 + 工作台
+│   └── _shoot_stream.js      # 自动截图：实时告警流面板
 ├── tests/                    # pytest 套件（61 项；临时库 + 离线 Mock，不污染运行数据）
 │   ├── conftest.py           # 临时 DB + mock LLM + TestClient fixture
 │   ├── test_auth.py / test_workspaces.py / test_closed_loop.py
@@ -147,13 +150,14 @@ cp .env.example .env
 # 8. 跑测试套件（pytest，无需启动服务器；自动使用临时数据库 + 离线 Mock，不污染运行数据）
 python -m pytest          # 61 项：只读端点 / JWT 鉴权 / 业务域隔离 / 闭环编排 / 工具复用 / Mock 确定性 / 告警降噪分层 / W3 经典端点 / Prometheus 指标 / 限流
 
-# 9. W3/主界面：启动真实 HTTP 服务 —— FastAPI 同源托管 web/ 前端（8 视图）
+# 9. W3/主界面：启动真实 HTTP 服务 —— FastAPI 同源托管 web/ 前端（9 视图）
 python -m uvicorn src.api.server:app --reload --port 8000
-#    ✨ 浏览器打开 http://localhost:8000 即为主界面（作战室 / 闭环看板 / 工作台 / 工具库 / 消息栏…）
+#    ✨ 浏览器打开 http://localhost:8000 即为主界面（作战室 / 实时告警流 / 闭环看板 / 工作台 / 工具库 / 消息栏…）
 #    Swagger: http://localhost:8000/docs · 健康检查: curl http://127.0.0.1:8000/health
+#    进入「实时告警流」面板可一键启动 story/mixed 流水线，Agent 持续降噪根因处置
 #    curl -X POST http://127.0.0.1:8000/closed-loop/run -H "Content-Type: application/json" -d "{}"
 
-# 10.（备选 / HF Spaces）历史 Gradio 三 Tab 前台（独立进程，无 8 视图闭环体验）
+# 10.（备选 / HF Spaces）历史 Gradio 三 Tab 前台（独立进程，无 9 视图闭环体验）
 python app.py
 #     浏览器打开 http://localhost:7860；部署见下方"部署到 HF Spaces"
 #     （app.py 内置 ensure_data()，干净环境会自动造数据，无需先跑第 9 步）
@@ -170,7 +174,8 @@ python app.py
 - [x] **W2 双 Agent 核心**：运维 Agent（降噪/根因/调工具/处置）+ 研发 Agent（CodeGen 造工具/注册/变更单/SOP）
 - [x] **W2 闭环编排**：LangGraph 编排运维闭环图 + 研发闭环图，端到端演示「告警→缺工具→研发造工具→运维复用」
 - [x] **W3 后端 API**：FastAPI 把底层能力 + 双 Agent 暴露为 HTTP 接口，含 `/alert /chat /feedback /closed-loop/run` 等，闭环自动化；pytest 套件（`tests/`）验证全绿
-- [x] **W4 前端 + 部署 + 求职材料**：**主界面 = FastAPI 同源托管 `web/` 前端**（原生 HTML/CSS/JS，左导航：Agent 作战室 / 闭环看板 / 消息栏 / 接入层 / 拓扑视图 / 工具库 / 知识库），含 Agent 增删、告警根因分析、真实告警样本库（55 条）、工具复用闭环；历史 Gradio 前台（app.py）留作 HF Spaces 备选；CAREER.md（STAR 话术 / 1 页简介）、DEMO_SCRIPT.md（录屏分镜）
+- [x] **W4 前端 + 部署 + 求职材料**：**主界面 = FastAPI 同源托管 `web/` 前端**（原生 HTML/CSS/JS，左导航：Agent 作战室 / **实时告警流** / 闭环看板 / 消息栏 / 接入层 / 拓扑视图 / 工具库 / 知识库），含 Agent 增删、告警根因分析、真实告警样本库（55 条）、工具复用闭环；历史 Gradio 前台（app.py）留作 HF Spaces 备选；CAREER.md（STAR 话术 / 1 页简介）、DEMO_SCRIPT.md（录屏分镜）
+- [x] **v0.8.0 · 持续监控演示**：新增后端 `src/core/alert_stream.py` 模拟告警流水线 + `/stream/*` API（start/stop/reset/status/feed）+ 前端「实时告警流」面板；流水线按节拍持续推送告警，Agent 逐条降噪/根因/处置，缺工具自动登记派发研发，后续同类故障直接复用沉淀，像真实监控大屏一样滚动展示。CLI 演示 `scripts/demo_stream.py` 同步可用。
 
 > 国产化叙事点：LLMClient 抽象层可无缝切换 DeepSeek / Qwen / GLM；工具与知识库均可私有化部署。
 
@@ -203,6 +208,13 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.0 · 持续告警流演示**
+- 新增 `src/core/alert_stream.py` 模拟告警流水线：把 `data/alerts.json` 的 55 条真实机群样本 + 3 条接入域故障剧本编排成「时间轴告警流」，后台线程按节拍持续推送；处置链路复用既有 `_ingest_flow`（与 webhook 接入完全一致），实现「缺工具 → 研发造工具 → 运维复用」闭环，并演示第二轮同类故障直接复用沉淀。
+- 新增 `/stream/start|stop|reset-demo|status|feed` 端点：`/stream/status` 与 `/stream/feed` 被限流白名单放行，前端可秒级轮询；启动时自动清洗样本预标字段，让流水线上每次降噪都真实跑规则 + LLM。
+- 前端新增「实时告警流」视图：分段控件切换剧本（mixed/story）、派发模式（auto/manual）、节拍（慢/中/快）；实时状态栏显示 LIVE 状态 / 当前告警 / 轮次；统计卡展示已接入 / 噪声抑制 / 真实处置 / 造工具 / 复用沉淀 / 错误；feed 表以监控大屏风格滚动，直观呈现 Agent 降噪、根因、闭环处置全过程。
+- 新增 `scripts/demo_stream.py` CLI：无 UI 场景下也能启动同一引擎，适合 CI / 录屏 / 后台演示。参数化 `--profile story --limit N --interval 500`。
+- 验证：真实 DeepSeek LLM 下 story 剧本 10 条实测——5 条噪声规则抑制、5 条真实故障产生 4 个新工具 + 1 个复用，errors=0；pytest 61 项全绿；HF Spaces 快照同步后版本戳一致。
+
 **多租户决策（Phase 3 边界说明）**
 当前采用**两级轻量租户隔离**且已实测：
 - **业务域 = 租户粒度**：requirements / agents / messages 均带 `workspace_id`，派发路由按域隔离（跨域实测不串）、删域级联清理；
@@ -221,7 +233,7 @@ python app.py
 
 > 本地演示同样一条命令：`python app.py` → 打开 http://localhost:7860。
 >
-> 说明：本地开发/面试演示的**主界面是 `web/` 8 视图前端**（第 9 步 uvicorn 一条命令，打开 http://localhost:8000）；app.py（Gradio）仅在 HF Spaces 场景作为免后端进程的轻量入口。
+> 说明：本地开发/面试演示的**主界面是 `web/` 9 视图前端**（第 9 步 uvicorn 一条命令，打开 http://localhost:8000）；app.py（Gradio）仅在 HF Spaces 场景作为免后端进程的轻量入口。
 
 ## 求职材料
 

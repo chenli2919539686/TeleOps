@@ -6,7 +6,7 @@
   <title>TeleOps · 智能体平台</title>
   <link rel="icon" href="logo.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="styles.css?v=0.7.5" />
+  <link rel="stylesheet" href="styles.css?v=0.8.0" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -35,6 +35,7 @@
       <nav class="nav">
         <button class="nav-item active" data-view="overview"><span class="nav-ico">🎛️</span>Agent 作战室</button>
         <div class="nav-sep"></div>
+        <button class="nav-item" data-view="stream"><span class="nav-ico">📡</span>实时告警流</button>
         <button class="nav-item" data-view="loop"><span class="nav-ico">🔄</span>闭环看板</button>
         <button class="nav-item" data-view="board"><span class="nav-ico">📥</span>消息栏</button>
         <button class="nav-item" data-view="integ"><span class="nav-ico">🔌</span>接入层</button>
@@ -110,6 +111,60 @@
             <div class="empty">加载中…</div>
           </div>
         </div>
+      </section>
+
+      <!-- 实时告警流（持续监控演示） -->
+      <section class="view" id="view-stream">
+        <header class="view-head">
+          <h1>📡 实时告警流 · 永不停摆的持续监控演示</h1>
+          <p>把 <code>data/alerts.json</code> 的 55 条真实机群告警样本变成一条「时间轴告警流」：告警按节拍持续涌入 → 运维 Agent 逐条走「规则降噪 → LLM 二次降噪 → 根因推理 → 工具处置」→ 发现工具缺口自动登记并派发研发造工具 → 后续同类故障直接复用沉淀。处置链路与接入层 webhook 完全一致，后续替换成真实推送即可。</p>
+        </header>
+
+        <div class="stream-bar">
+          <div class="stream-cfg">
+            <span class="mode-label">剧本</span>
+            <span class="seg" id="streamProfileSeg">
+              <button type="button" class="seg-btn" data-p="mixed">🌊 mixed · 真实样本为主</button>
+              <button type="button" class="seg-btn active" data-p="story">🎬 story · 聚焦闭环</button>
+            </span>
+            <span class="mode-label">处置</span>
+            <span class="seg" id="streamModeSeg">
+              <button type="button" class="seg-btn active" data-m="auto">⚡ 自动</button>
+              <button type="button" class="seg-btn" data-m="manual">✋ 手动</button>
+            </span>
+            <span class="mode-label">节拍</span>
+            <span class="seg" id="streamTickSeg">
+              <button type="button" class="seg-btn" data-t="2400">慢 2.4s</button>
+              <button type="button" class="seg-btn active" data-t="1200">中 1.2s</button>
+              <button type="button" class="seg-btn" data-t="500">快 0.5s</button>
+            </span>
+          </div>
+          <div class="stream-actions">
+            <button class="primary-btn" id="streamStart">▶ 启动流水线</button>
+            <button class="ghost-btn" id="streamStop" disabled>⏹ 停止</button>
+            <button class="ghost-btn" id="streamReset">↺ 重置演示数据</button>
+          </div>
+        </div>
+
+        <div class="stream-livebar" id="streamLivebar">
+          <span class="live-pill idle"><span class="live-dot"></span><span id="liveTxt">未运行</span></span>
+          <span class="live-meta" id="liveMeta">—</span>
+          <span class="live-current" id="liveCurrent"></span>
+          <span class="live-err" id="liveErr"></span>
+        </div>
+
+        <div class="stream-stats" id="streamStats"></div>
+
+        <div class="stream-feed">
+          <div class="sf-head">
+            <span>时间</span><span>#</span><span>判定</span><span>方式</span>
+            <span>告警</span><span>处置摘要</span><span>纵向闭环</span><span>耗时</span>
+          </div>
+          <div class="sf-rows" id="streamFeed">
+            <div class="empty">流水线未启动。点上方「▶ 启动流水线」，告警将按节拍持续涌入，Agent 逐条降噪、根因与处置，像真实监控大屏一样滚动。</div>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:10px">💡 提示：story 剧本聚焦「缺工具 → 造工具 → 复用」闭环。若工具库已沉淀 <code>optical_power_probe / temperature_probe</code>，先点「↺ 重置演示数据」让闭环从造工具开始；mixed 剧本贴近真实监控（海量噪声中偶发真实故障）。流内登记的需求会出现在对应业务域的「消息栏」。</p>
       </section>
 
       <!-- 闭环看板 -->
@@ -363,6 +418,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.7.5"></script>
+  <script src="app.js?v=0.8.0"></script>
 </body>
 </html>
