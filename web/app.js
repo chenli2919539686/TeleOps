@@ -307,7 +307,9 @@ function renderStreamStats(s) {
   setStreamStat("reused", st.reused ?? 0);
   setStreamStat("pending", st.pending ?? 0);
   setStreamStat("errors", st.errors ?? 0);
-  setStreamStat("uptime", fmtUptime(s.uptime_s || 0));
+  // 停止后 _started_at 已清空，uptime_s 为 0；但「已运行」显示 00:00 仍像计时卡住，
+  // 非运行态统一显示「—」，避免用户误以为计时还在走。
+  setStreamStat("uptime", s.running ? fmtUptime(s.uptime_s || 0) : "—");
 }
 
 function renderStreamLivebar(s) {

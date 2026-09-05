@@ -181,6 +181,7 @@ class AlertStream:
             if not self._running:
                 return
             self._running = False
+            self._started_at = None   # 停止后清空启动时刻，避免 uptime_s 继续累计
         self._stop_evt.set()
         th = self._thread
         if th and th is not threading.current_thread():
