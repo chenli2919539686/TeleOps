@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.13"
+VERSION = "0.8.14"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -96,7 +96,7 @@ app.add_middleware(
 API_TOKEN = os.environ.get("TELEOPS_API_TOKEN", "").strip()
 AUTH_REQUIRED = bool(API_TOKEN)
 _PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc",
-                 "/auth/status", "/auth/register", "/auth/login"}
+                 "/auth/status", "/auth/register", "/auth/login", "/auth/logout"}
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
@@ -706,6 +706,21 @@ def auth_me(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
     return {"username": user.get("sub"), "is_admin": user.get("is_admin", False)}
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request):
+    """注销当前 JWT：加入服务端黑名单，重启后端后仍失效（黑名单持久化）。
+
+    前端应在清空 localStorage 之前调用本端点，使残留 token 立即作废——
+    修复「共享机器关浏览器不登出 → 下次访问仍以前次账号身份进入」的问题。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=400, detail="缺少 Authorization 头")
+    revoked = auth.revoke_token(token)
+    return {"detail": "已注销", "revoked": revoked}
 
 
 @app.get("/topology")

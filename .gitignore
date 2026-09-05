@@ -32,3 +32,12 @@ tools/*.zip
 data/.server.pid
 data/.caddy.pid
 data/.caddy.Caddyfile
+# JWT 注销黑名单（运行期持久化，含 jti，非源码）
+data/jwt_revoked.json
+# 运行期日志（后端 / Caddy 输出）
+data/caddy.log
+data/teleops_server.log
+data/caddy_server.log
+# 重置/备份产物（scripts 类操作生成）
+data/_reset_*/
+data/teleops.db.bak-*

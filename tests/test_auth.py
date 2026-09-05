@@ -71,3 +71,37 @@ def test_write_with_jwt_ok(client, auth_headers):
     assert r.status_code in (200, 201), r.text
     wid = r.json()["id"]
     assert client.delete(f"/workspaces/{wid}", headers=auth_headers).status_code in (200, 204)
+
+
+def test_logout_revokes_token(client):
+    """登出后旧 JWT 立即失效（进黑名单），解决共享机器不登出残留问题。
+
+    用独立用户，绝不触碰 session 级 auth_headers，避免污染其它用例。
+    """
+    u, p = "logout_" + uuid.uuid4().hex[:8], "Secret123456"
+    r = client.post("/auth/register", json={"username": u, "password": p})
+    assert r.status_code in (200, 201), r.text
+    token = r.json()["token"]
+    hdr = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+    # 登出前可正常读取身份
+    assert client.get("/auth/me", headers=hdr).status_code == 200
+    # 调登出
+    r = client.post("/auth/logout", headers=hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["revoked"] is True
+    # 登出后旧 token 立即失效
+    assert client.get("/auth/me", headers=hdr).status_code == 401
+
+
+def test_revoke_token_makes_decode_return_none():
+    """auth.revoke_token 后 decode_token 直接返回 None（黑名单命中）。"""
+    from src.core import auth as auth_mod
+    token = auth_mod.encode_token({"sub": "k", "uid": 1, "is_admin": True})
+    assert auth_mod.decode_token(token) is not None
+    assert auth_mod.revoke_token(token) is True
+    assert auth_mod.decode_token(token) is None  # 命中黑名单
+
+
+def test_logout_requires_authorization(client):
+    """/auth/logout 必须带 Authorization 头，否则 400。"""
+    assert client.post("/auth/logout").status_code == 400

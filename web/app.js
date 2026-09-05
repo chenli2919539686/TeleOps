@@ -1658,8 +1658,11 @@ async function checkAuth() {
     // 同步服务端注册邀请码开关
     INVITE_REQUIRED = !!d.invite_required;
     syncLoginTabs();   // 邀请码开关状态可能变化，刷新 tab UI 显隐
-    // 服务端支持 JWT 且本地有凭据 → 校验并恢复会话
-    if (d.jwt_enabled && JWT) refreshMe();
+    // 服务端支持 JWT 且本地有凭据 → 同步校验并恢复会话（C：启动即 await，
+    // 避免「看着像游客实际是 admin」的渲染窗口期；401 时 refreshMe 会清 JWT）
+    if (d.jwt_enabled && JWT) await refreshMe();
+    // C：无论已登录还是游客，启动后立刻把身份反映到右上角，杜绝误判
+    renderAuthArea();
   } catch (e) {}
 }
 
@@ -1671,7 +1674,9 @@ function renderAuthArea() {
   const box = document.getElementById("authArea");
   if (!box) return;
   if (USER) {
-    box.innerHTML = `<span class="user-chip" title="已登录">👤 ${USER.username}${USER.is_admin ? " · admin" : ""}</span>`
+    const role = USER.is_admin ? " · admin" : "";
+    const tip = USER.is_admin ? "（管理员）· 共享机器请务必点登出" : "· 共享机器请记得登出";
+    box.innerHTML = `<span class="user-chip" title="已登录为 ${USER.username}${tip}">👤 ${USER.username}${role}</span>`
       + `<button class="ghost-btn sm" id="logoutBtn">登出</button>`;
     box.querySelector("#logoutBtn").onclick = logout;
   } else {
@@ -1738,7 +1743,17 @@ async function submitLogin() {
   }
 }
 
-function logout() {
+async function logout() {
+  // 先通知服务端把当前 JWT 作废（A 修复核心）：残留 token 立即进黑名单，
+  // 即使对方下次用旧 token 也不能再以原账号身份进入（解决共享机器误判）。
+  if (JWT) {
+    try {
+      await fetch(API + "/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + JWT },
+      });
+    } catch (e) { /* 服务端不可达也不阻塞本地登出 */ }
+  }
   setJwt("", null);
   // 清空内存态的业务数据，避免登出后残留上一个用户的 Agent 矩阵 / 业务域
   CURRENT_WS = null;

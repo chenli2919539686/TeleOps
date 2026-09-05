@@ -31,6 +31,8 @@ os.environ["TELEOPS_RATE_LIMIT"] = "off"  # 全局关限流：既有用例不受
 # 不隔离的话 pytest 会读到它去联网调用——既烧额度，又让用例结果不确定。
 os.environ["TELEOPS_LLM_CONFIG_FILE"] = str(_TMP_DIR / "llm_config.json")
 os.environ["TELEOPS_USAGE_FILE"] = str(_TMP_DIR / "llm_usage.json")
+# JWT 注销黑名单必须隔离到临时目录，否则会读取/写入真实 data/jwt_revoked.json
+os.environ["TELEOPS_REVOKED_FILE"] = str(_TMP_DIR / "jwt_revoked.json")
 
 # 研发 Agent 造工具会落盘 .py 与 SOP 文档，同样重定向到临时目录，避免污染仓库
 _TMP_TOOLS = _TMP_DIR / "tools"
