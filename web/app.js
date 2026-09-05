@@ -1729,7 +1729,21 @@ async function submitLogin() {
 
 function logout() {
   setJwt("", null);
+  // 清空内存态的业务数据，避免登出后残留上一个用户的 Agent 矩阵 / 业务域
+  CURRENT_WS = null;
+  WS_LIST = [];
+  AGENTS.ops = [];
+  AGENTS.dev = [];
+  WAR_AGENTS = {};
+  // 清空作战室 / 消息栏 / 工具库等面板内容
+  const clearIds = ["warRoomGrid", "warDevGrid", "msgList", "toolList", "kbList", "topoGraph", "overviewPanel"];
+  clearIds.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  });
   checkAuth();
+  // 重新拉取业务域列表（此时无登录态，会被引导到登录页或只剩公共域）
+  if (typeof loadWorkspaces === "function") loadWorkspaces();
 }
 
 function syncLoginTabs() {

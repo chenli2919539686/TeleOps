@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.7"
+VERSION = "0.8.9"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
@@ -659,7 +659,11 @@ def auth_status():
 
 @app.post("/auth/register")
 def auth_register(req: AuthReq):
-    """注册用户：第一个注册者自动成为管理员。密码至少 6 位。"""
+    """注册用户：第一个注册者自动成为管理员。密码至少 6 位。
+
+    注册成功后自动为其创建一套个人业务域（复制默认 Agent 矩阵），
+    多租户隔离下该用户登录后只看到公共域 + 自己的域。
+    """
     if not req.username or not req.password:
         raise HTTPException(status_code=400, detail="用户名与密码必填")
     if len(req.password) < 6:
@@ -667,6 +671,12 @@ def auth_register(req: AuthReq):
     if auth.get_user(req.username):
         raise HTTPException(status_code=409, detail="用户名已存在")
     u = auth.create_user(req.username, req.password)
+    # 为新用户建个人域（多租户隔离：owner_id 绑定，仅本人可见）
+    try:
+        ws_store.create_personal(u["id"], u["username"])
+    except Exception as e:  # 建域失败不应阻断注册，仅记录
+        metrics.inc("teleops_register_personal_ws_failed")
+        print(f"[warn] 为 {u['username']} 建个人域失败: {e}")
     token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
     return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]}}
 
@@ -1044,12 +1054,22 @@ def stream_tasks(limit: int = 50, agent_id: Optional[str] = None):
 
 # ---------------- 多 Agent 矩阵 + 消息栏（人工 / 自动派发闭环） ----------------
 @app.get("/agents")
-def agents(workspace_id: Optional[str] = None):
-    """返回 Agent 列表（含实时 status：idle/busy/error）。传 workspace_id 可按业务域过滤。"""
+def agents(workspace_id: Optional[str] = None, request: Request = None):
+    """返回 Agent 列表（含实时 status：idle/busy/error）。传 workspace_id 可按业务域过滤。
+
+    多租户隔离：仅返回当前登录用户「可见业务域」下的 Agent（公共域 + 本人私有域）；
+    未登录（匿名）时退化为全量（保持向后兼容）。
+    """
+    user = getattr(request.state, "user", None) if request else None
+    owner_id = user.get("uid") if user else None
+    visible = set(ws_store.visible_workspace_ids(owner_id)) if owner_id is not None else None
+    items = registry.list(workspace_id=workspace_id)
+    if visible is not None:
+        items = [a for a in items if a.get("workspace_id") in visible]
     return {
-        "agents": registry.list(workspace_id=workspace_id),
-        "primary_ops": registry.primary("ops"),
-        "primary_dev": registry.primary("dev"),
+        "agents": items,
+        "primary_ops": registry.primary("ops", workspace_id) if workspace_id else None,
+        "primary_dev": registry.primary("dev", workspace_id) if workspace_id else None,
     }
 
 
@@ -1226,8 +1246,11 @@ def agent_register_gap(agent_id: str, req: GapRegisterReq):
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------
 # ---------------- 业务域 / 工作空间（持久化） ----------------
 @app.get("/workspaces")
-def list_workspaces():
-    wss = ws_store.list()
+def list_workspaces(request: Request):
+    """列出当前登录用户可见的业务域（公共域 + 本人私有域）。多租户隔离。"""
+    user = getattr(request.state, "user", None)
+    owner_id = user.get("uid") if user else None
+    wss = ws_store.list(owner_id=owner_id)
     # 附带各业务域「待处理需求数」（未闭环、未驳回），供作战室悬浮卡展示
     for w in wss:
         w["pending"] = len([
@@ -1406,4 +1429,7 @@ if WEB_DIR.exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 默认只监听本机回环（127.0.0.1），避免本地开发时意外暴露到局域网/公网；
+    # 需要局域网内其他设备访问时，设 TELEOPS_HOST=0.0.0.0 再启动。
+    _host = os.environ.get("TELEOPS_HOST", "127.0.0.1")
+    uvicorn.run(app, host=_host, port=int(os.environ.get("TELEOPS_PORT", "8000")))

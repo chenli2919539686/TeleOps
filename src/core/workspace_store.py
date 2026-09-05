@@ -86,9 +86,18 @@ class WorkspaceStore:
             out.append(a)
         return out
 
-    def list(self) -> List[dict]:
+    def list(self, owner_id: Optional[int] = None) -> List[dict]:
+        """列出业务域。
+
+        owner_id 不传（None）→ 返回全部（系统/管理视角，保持向后兼容）。
+        传 owner_id → 多租户隔离：只返回「公共域(owner_id IS NULL)」+「本人私有域」，
+        别人的私有域对其完全不可见。
+        """
         out = []
         for w in db.query("SELECT * FROM workspaces ORDER BY id"):
+            # 私有域（owner_id 非 NULL）仅本人可见；公共域对所有登录用户可见
+            if owner_id is not None and w["owner_id"] is not None and w["owner_id"] != owner_id:
+                continue
             agents = self._agents_of(w["id"])
             out.append({
                 "id": w["id"], "name": w["name"], "adapter_id": w["adapter_id"],
@@ -98,6 +107,10 @@ class WorkspaceStore:
                 "dev": [a for a in agents if a["kind"] == "dev"],
             })
         return out
+
+    def visible_workspace_ids(self, owner_id: Optional[int] = None) -> List[str]:
+        """返回某用户可见的业务域 id 集合（公共域 + 本人域），供 /agents 等接口做隔离过滤。"""
+        return [w["id"] for w in self.list(owner_id=owner_id)]
 
     def get(self, ws_id) -> Optional[dict]:
         w = db.query_one("SELECT * FROM workspaces WHERE id=?", (ws_id,))
@@ -150,6 +163,35 @@ class WorkspaceStore:
             if self.registry:
                 self.registry.register(a["kind"], a["id"], a["name"], a["scope"],
                                        a["description"], primary=a["primary"], workspace_id=ws_id)
+        return self.get(ws_id)
+
+    def create_personal(self, owner_id: int, username: str) -> dict:
+        """为新注册用户建一套个人业务域，复制默认域的完整 Agent 矩阵（4 个）。
+
+        域 id 用 ws-<username> 便于辨识且天然唯一（重名用户 id 不同但用户名唯一）；
+        若已存在则追加序号兜底。owner_id 绑定到注册用户，保证多租户隔离下只有本人可见。
+        """
+        base_id = _slug(username) or "ws"
+        ws_id = f"ws-{base_id}"
+        n = 2
+        while db.query_one("SELECT 1 FROM workspaces WHERE id=?", (ws_id,)):
+            ws_id = f"ws-{base_id}-{n}"
+            n += 1
+        name = f"{username} 的工作域"
+        db.execute(
+            "INSERT INTO workspaces (id,name,adapter_id,mode,owner_id,created_at) VALUES (?,?,?,?,?,?)",
+            (ws_id, name, "alert-prometheus", "auto", owner_id, db._now()))
+        for a in DEFAULT_WORKSPACE["agents"]:
+            agent_id = f"{ws_id}-{a['id'].split('-', 1)[-1]}"  # 去掉默认域前缀，换成个人域前缀
+            db.execute(
+                "INSERT OR IGNORE INTO agents "
+                "(id,workspace_id,name,kind,scope,description,is_primary,status) VALUES (?,?,?,?,?,?,?,?)",
+                (agent_id, ws_id, a["name"], a["kind"], json.dumps(a.get("scope", []), ensure_ascii=False),
+                 a.get("description", ""), 1 if a.get("primary") else 0, "idle"))
+            if self.registry:
+                self.registry.register(a["kind"], agent_id, a["name"], a.get("scope", []),
+                                       a.get("description", ""), primary=bool(a.get("primary")),
+                                       workspace_id=ws_id)
         return self.get(ws_id)
 
     def rename(self, ws_id, name) -> bool:
