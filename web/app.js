@@ -15,6 +15,7 @@ function setJwt(t, user) {
   renderAuthArea();
 }
 let _suppressLoginPrompt = false;   // 登录/注册请求自身 401 时不弹窗
+let _identityReloading = false;     // 登录/登出身份重载期间屏蔽自动刷新，避免竞态
 
 // 统一请求封装：优先携带每用户 JWT，其次共享 Token；写操作 401 时弹出登录框
 function apiFetch(url, opts = {}) {
@@ -782,11 +783,12 @@ function updateWsControls() {
   if (wsDel) { wsDel.style.display = mutable ? "" : "none"; }
 }
 
-async function loadWorkspaces() {
+async function loadWorkspaces(force = false) {
   try {
     const d = await (await apiFetch(`/workspaces`)).json();
     WS_LIST = d.workspaces || [];
-    if (!CURRENT_WS && WS_LIST.length) {
+    // force：登录/登出/切换账号后必须重新选默认域，不能沿用旧 CURRENT_WS
+    if ((force || !CURRENT_WS) && WS_LIST.length) {
       // 登录用户默认进入自己的个人域，避免一上来就改公共域
       CURRENT_WS = _pickDefaultWs(WS_LIST);
     }
@@ -820,6 +822,9 @@ function _uiBusy() {
   // 刷新会重建 DOM，会打断正在填的表单 / 正在看的工作台输出。
   // 注意：openModal() 是把 open 加在 .modal-mask 上（不是内层的 .modal）。
   if (document.querySelector(".modal-mask.open")) return true;
+  // 登录/登出身份重载期间禁止自动刷新：modal 已关闭但 loadWorkspaces 还没完成，
+  // 此时 USER/CURRENT_WS 处于中间态，刷新会抢走默认域选择（导致落回公共域）。
+  if (_identityReloading) return true;
   const wb = document.getElementById("wbDrawer");
   return !!(wb && wb.classList.contains("open"));
 }
@@ -877,12 +882,17 @@ async function refreshCurrentView() {
 
 // 身份变更（登录/登出）后统一走这里：清域态 → 等身份确认 → 重拉域 → 刷联动面板
 async function reloadForIdentityChange() {
-  CURRENT_WS = null;
-  WS_LIST = [];
-  WAR_AGENTS = {};
-  await checkAuth();        // 内部 await refreshMe() 才拿到 USER，必须先等它完成
-  await loadWorkspaces();   // 按 USER.uid 选默认域
-  await refreshLinkedPanels();
+  _identityReloading = true;
+  try {
+    CURRENT_WS = null;
+    WS_LIST = [];
+    WAR_AGENTS = {};
+    await checkAuth();            // 内部 await refreshMe() 才拿到 USER，必须先等它完成
+    await loadWorkspaces(true);   // force=true：按 USER.uid 重新选默认域，不被竞态覆盖
+    await refreshLinkedPanels();
+  } finally {
+    _identityReloading = false;
+  }
 }
 
 async function loadOverview() { if (CURRENT_WS) await renderOverview(CURRENT_WS); else await loadWorkspaces(); }

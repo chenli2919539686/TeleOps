@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.16"
+VERSION = "0.8.17"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -688,7 +688,7 @@ def auth_register(req: AuthReq):
         metrics.inc("teleops_register_personal_ws_failed")
         print(f"[warn] 为 {u['username']} 建个人域失败: {e}")
     token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
-    return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]}}
+    return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
 
 
 @app.post("/auth/login")
@@ -697,7 +697,7 @@ def auth_login(req: AuthReq):
     if not u:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
-    return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]}}
+    return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
 
 
 @app.get("/auth/me")
