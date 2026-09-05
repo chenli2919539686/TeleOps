@@ -21,9 +21,11 @@ from collections import defaultdict, deque
 # 默认配置（可用环境变量覆盖；中间件在 import 时读取一次）
 WINDOW = 60.0                       # 窗口秒数
 ENABLED = os.environ.get("TELEOPS_RATE_LIMIT", "on").strip().lower() in ("1", "on", "true", "yes")
-READ_LIMIT = int(os.environ.get("TELEOPS_RATE_LIMIT_READ", "300"))    # 读接口 /min/IP
+# v0.8.12：调严到推荐档。登录注册最严防爆破，写接口 60/min（北向告警源正常频率），
+# 读接口 120/min（前端轮询友好）。如需调整用 TELEOPS_RATE_LIMIT_* 环境变量覆盖。
+READ_LIMIT = int(os.environ.get("TELEOPS_RATE_LIMIT_READ", "120"))    # 读接口 /min/IP
 WRITE_LIMIT = int(os.environ.get("TELEOPS_RATE_LIMIT_WRITE", "60"))   # 写接口 /min/IP
-LOGIN_LIMIT = int(os.environ.get("TELEOPS_RATE_LIMIT_LOGIN", "10"))   # 登录注册 /min/IP
+LOGIN_LIMIT = int(os.environ.get("TELEOPS_RATE_LIMIT_LOGIN", "5"))    # 登录注册 /min/IP
 
 _hits: "defaultdict[str, deque]" = defaultdict(deque)
 _lock = threading.Lock()

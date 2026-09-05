@@ -60,3 +60,37 @@ def test_low_freq_paths_not_rate_limited(client):
     assert "teleops_rate_limited_total" in client.get("/metrics").text
     # 静态资源路径同样放行
     assert client.get("/styles.css").status_code in (200, 404)  # 不被 429 拦即可
+
+
+def test_default_thresholds_v0812():
+    """v0.8.12：默认阈值调严到推荐档（登录 5 / 写 60 / 读 120）。"""
+    # 用环境变量关闭副作用，但阈值是模块级常量，重新 import 检查
+    import importlib
+    import src.core.rate_limit as rl_mod
+    importlib.reload(rl_mod)
+    # 重载模块会重新读环境变量；此时 TELEOPS_RATE_LIMIT_* 仍是 conftest 默认值
+    # 直接断言当前默认（reload 后等同模块顶层定义）
+    assert rl_mod.LOGIN_LIMIT == 5, f"登录档应为 5，实际 {rl_mod.LOGIN_LIMIT}"
+    assert rl_mod.WRITE_LIMIT == 60, f"写档应为 60，实际 {rl_mod.WRITE_LIMIT}"
+    assert rl_mod.READ_LIMIT == 120, f"读档应为 120，实际 {rl_mod.READ_LIMIT}"
+
+
+def test_alert_ingest_rate_limited(client, auth_headers):
+    """/adapters/alert/ingest 走写档限额（北向告警源防刷）。"""
+    _open(write=3)
+    payload = {"alerts": [{"alertname": "TestAlert",
+                           "labels": {"host": "h1"},
+                           "annotations": {"summary": "unit"}}]}
+    # 前 3 次到达业务层（adapter_id 可能无效但不会被 429 拦）
+    seen = []
+    for _ in range(3):
+        r = client.post("/adapters/alert/ingest?adapter_id=alert-prometheus",
+                        json=payload, headers=auth_headers)
+        seen.append(r.status_code)
+        # 不管业务层 200/4xx，关键是不要在这一步出现 429
+        assert r.status_code != 429, f"前 3 次不应被限流: {r.text}"
+    # 第 4 次被限流
+    r = client.post("/adapters/alert/ingest?adapter_id=alert-prometheus",
+                    json=payload, headers=auth_headers)
+    assert r.status_code == 429, f"第 4 次应被限流，实际 {r.status_code}（前 3 次: {seen}）"
+    assert int(r.headers.get("Retry-After", "0")) >= 1
