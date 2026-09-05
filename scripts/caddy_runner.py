@@ -26,10 +26,35 @@ CADDY_EXE = TOOLS_DIR / "caddy.exe"
 CADDYFILE = Path(__file__).resolve().parent / "Caddyfile"
 PID_FILE = PROJECT_ROOT / "data" / ".caddy.pid"
 LOG_FILE = PROJECT_ROOT / "data" / "caddy_server.log"
+RUNTIME_CADDYFILE = PROJECT_ROOT / "data" / ".caddy.Caddyfile"
 BACKEND_HTTP = "127.0.0.1:8000"
 LISTEN_HTTPS_PORT = 443
 
 _DETACHED_NO_WINDOW = 0x00000008 | 0x08000000
+
+
+def get_lan_ip() -> str:
+    """获取本机局域网 IP，用于 Caddy 证书 SAN。失败回退 127.0.0.1。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        # 连接一个不会真实发送数据的公网地址，用来选对本网卡 IP
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _render_caddyfile() -> Path:
+    """将模板 Caddyfile 中的 {lan_ip} 替换为当前局域网 IP，写入运行时配置。"""
+    template = CADDYFILE.read_text(encoding="utf-8")
+    lan_ip = get_lan_ip()
+    rendered = template.replace("{lan_ip}", lan_ip)
+    RUNTIME_CADDYFILE.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_CADDYFILE.write_text(rendered, encoding="utf-8")
+    return RUNTIME_CADDYFILE
 
 
 def _err_print(msg):
@@ -146,6 +171,9 @@ def caddy_start():
     if not CADDYFILE.exists():
         return False, f"Caddyfile 缺失：{CADDYFILE}"
 
+    # 生成运行时 Caddyfile（替换 {lan_ip}）
+    runtime_cfg = _render_caddyfile()
+
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     log = open(LOG_FILE, "ab", buffering=0)
@@ -153,8 +181,7 @@ def caddy_start():
     exe = get_caddy_exe()
     cmd = [
         str(exe), "run",
-        "--config", str(CADDYFILE),
-        "--adapter", "",  # 默认 native
+        "--config", str(runtime_cfg),
     ]
     proc = subprocess.Popen(
         cmd,

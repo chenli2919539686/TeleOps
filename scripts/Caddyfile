@@ -9,8 +9,9 @@
 # 反代：本地 127.0.0.1:8000（TeleOps 后端 uvicorn）
 # 证书：Caddy internal 自签证书（首次访问浏览器提示「不安全」，点高级→继续即可）
 
-# LAN HTTPS 入口：所有网卡（含 192.168.x.x）都监听 443
-:443 {
+# LAN HTTPS 入口：明确列出 IP/主机名，让 Caddy internal 证书覆盖这些 SAN
+# {lan_ip} 由 caddy_runner.py 在启动时替换为当前局域网 IP
+127.0.0.1, localhost, {lan_ip} {
     tls internal
 
     # 反代到本地后端

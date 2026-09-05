@@ -28,6 +28,7 @@ node_modules/
 # Caddy HTTPS 反代运行时二进制与下载缓存（caddy_setup.py 管理）
 tools/caddy.exe
 tools/*.zip
-# 后端 + Caddy PID 文件（运行期产物）
+# 后端 + Caddy PID 文件与运行时配置（运行期产物）
 data/.server.pid
 data/.caddy.pid
+data/.caddy.Caddyfile

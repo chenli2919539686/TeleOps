@@ -15,18 +15,29 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def test_caddyfile_exists_and_skeleton_valid():
-    """Caddyfile 必须存在，关键字段齐全。"""
+def test_caddyfile_template_exists_and_skeleton_valid():
+    """Caddyfile 模板必须存在，关键字段齐全。"""
     caddyfile = ROOT / "scripts" / "Caddyfile"
     assert caddyfile.exists(), f"Caddyfile 缺失：{caddyfile}"
     text = caddyfile.read_text(encoding="utf-8")
-    # 监听 443
-    assert ":443 {" in text, "Caddyfile 应监听 :443"
+    # 站点地址明确列出 IP/主机名，让 internal 证书覆盖 SAN
+    assert "127.0.0.1, localhost, {lan_ip}" in text, "Caddyfile 应覆盖 127.0.0.1 / localhost / {lan_ip}"
     # 自签证书
     assert "tls internal" in text, "应使用 tls internal 自签证书"
     # 反代到后端
     assert "127.0.0.1:8000" in text, "应反代到 127.0.0.1:8000"
     assert "reverse_proxy" in text, "应使用 reverse_proxy 指令"
+
+
+def test_render_caddyfile_replaces_lan_ip():
+    """_render_caddyfile 把 {lan_ip} 替换为真实局域网 IP。"""
+    from scripts import caddy_runner
+    runtime = caddy_runner._render_caddyfile()
+    text = runtime.read_text(encoding="utf-8")
+    assert "{lan_ip}" not in text, "运行时 Caddyfile 不应残留占位符"
+    assert caddy_runner.get_lan_ip() in text, "运行时 Caddyfile 应包含当前局域网 IP"
+    # 监听 443（站点块内会隐式监听默认 HTTPS 端口）
+    assert "127.0.0.1, localhost," in text, "站点地址应保持三元素格式"
 
 
 def test_caddy_runner_resolves_path():
