@@ -1068,14 +1068,13 @@ def agents(workspace_id: Optional[str] = None, request: Request = None):
     """返回 Agent 列表（含实时 status：idle/busy/error）。传 workspace_id 可按业务域过滤。
 
     多租户隔离：仅返回当前登录用户「可见业务域」下的 Agent（公共域 + 本人私有域）；
-    未登录（匿名）时退化为全量（保持向后兼容）。
+    未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。
     """
     user = getattr(request.state, "user", None) if request else None
-    owner_id = user.get("uid") if user else None
-    visible = set(ws_store.visible_workspace_ids(owner_id)) if owner_id is not None else None
+    owner_id = user.get("uid") if user else -1  # -1 表示匿名，仅可见公共域
+    visible = set(ws_store.visible_workspace_ids(owner_id))
     items = registry.list(workspace_id=workspace_id)
-    if visible is not None:
-        items = [a for a in items if a.get("workspace_id") in visible]
+    items = [a for a in items if a.get("workspace_id") in visible]
     return {
         "agents": items,
         "primary_ops": registry.primary("ops", workspace_id) if workspace_id else None,
@@ -1257,9 +1256,10 @@ def agent_register_gap(agent_id: str, req: GapRegisterReq):
 # ---------------- 业务域 / 工作空间（持久化） ----------------
 @app.get("/workspaces")
 def list_workspaces(request: Request):
-    """列出当前登录用户可见的业务域（公共域 + 本人私有域）。多租户隔离。"""
+    """列出当前登录用户可见的业务域（公共域 + 本人私有域）。多租户隔离。
+    未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。"""
     user = getattr(request.state, "user", None)
-    owner_id = user.get("uid") if user else None
+    owner_id = user.get("uid") if user else -1  # -1 表示匿名，仅可见公共域
     wss = ws_store.list(owner_id=owner_id)
     # 附带各业务域「待处理需求数」（未闭环、未驳回），供作战室悬浮卡展示
     for w in wss:

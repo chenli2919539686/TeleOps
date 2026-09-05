@@ -7,7 +7,7 @@ from tests.test_tool_reuse import TEMP_ALERT
 
 
 def test_create_workspace_with_agents(client, auth_headers, ws_id):
-    r = client.get(f"/agents?workspace_id={ws_id}")
+    r = client.get(f"/agents?workspace_id={ws_id}", headers=auth_headers)
     assert r.status_code == 200, r.text
     agents = r.json()["agents"]
     kinds = {a["kind"] for a in agents}
@@ -18,8 +18,8 @@ def test_create_workspace_with_agents(client, auth_headers, ws_id):
 
 def test_domain_isolation(client, auth_headers, ws_id):
     """A1: 不同业务域的 Agent 互不串扰。"""
-    other = client.get("/agents?workspace_id=core-net").json()["agents"]
-    mine = client.get(f"/agents?workspace_id={ws_id}").json()["agents"]
+    other = client.get("/agents?workspace_id=core-net", headers=auth_headers).json()["agents"]
+    mine = client.get(f"/agents?workspace_id={ws_id}", headers=auth_headers).json()["agents"]
     mine_ids = {a["id"] for a in mine}
     other_ids = {a["id"] for a in other}
     assert not (mine_ids & other_ids), "两个域的 Agent id 不应重叠"
@@ -71,9 +71,9 @@ def test_delete_cascade(client, auth_headers):
     wid = r.json()["id"]
     assert client.delete(f"/workspaces/{wid}", headers=auth_headers).status_code in (200, 204)
     # 级联：域内 Agent 一并清理
-    assert client.get(f"/agents?workspace_id={wid}").json()["agents"] == []
-    # 域本身消失
-    assert wid not in [w["id"] for w in client.get("/workspaces").json()["workspaces"]]
+    assert client.get(f"/agents?workspace_id={wid}", headers=auth_headers).json()["agents"] == []
+    # 域本身消失（从所有者视角查看）
+    assert wid not in [w["id"] for w in client.get("/workspaces", headers=auth_headers).json()["workspaces"]]
 
 
 def test_delete_cascade_requirements_and_messages(client, auth_headers):
@@ -102,7 +102,7 @@ def test_delete_cascade_requirements_and_messages(client, auth_headers):
         assert reqs, "删域前应有需求记录，否则本用例失去意义"
 
         # 再写一条操作记录（raise 闭环本身不落 messages）
-        agent_id = client.get(f"/agents?workspace_id={wid}").json()["agents"][0]["id"]
+        agent_id = client.get(f"/agents?workspace_id={wid}", headers=auth_headers).json()["agents"][0]["id"]
         mr = client.post(f"/workspaces/{wid}/messages", headers=auth_headers,
                          json={"agent_id": agent_id, "kind": "info",
                                "summary": "级联清理回归用记录"})

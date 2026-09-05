@@ -77,3 +77,18 @@ def test_public_domain_visible_to_all_logged_in(client):
     core = next(w for w in wss if w["id"] == "core-net")
     assert core["owner_id"] is None
     assert core["agent_count"] >= 2
+
+
+def test_anonymous_only_sees_public_workspace(client):
+    """未登录（匿名）访问时，/workspaces 与 /agents 只能看到公共域，不能看到任何个人域。"""
+    # 先注册一个用户制造个人域，确保库里有私有域
+    _register(client, "mtAnon_" + uuid.uuid4().hex[:8])
+
+    wss = client.get("/workspaces").json()["workspaces"]
+    assert len(wss) == 1, f"匿名应只看到 1 个公共域，实际 {wss}"
+    assert wss[0]["id"] == "core-net"
+    assert wss[0]["owner_id"] is None
+
+    agents = client.get("/agents").json()["agents"]
+    assert all(a["workspace_id"] == "core-net" for a in agents), \
+        f"匿名不应看到个人域 Agent，实际 {agents}"

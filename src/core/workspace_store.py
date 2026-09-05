@@ -90,7 +90,8 @@ class WorkspaceStore:
         """列出业务域。
 
         owner_id 不传（None）→ 返回全部（系统/管理视角，保持向后兼容）。
-        传 owner_id → 多租户隔离：只返回「公共域(owner_id IS NULL)」+「本人私有域」，
+        owner_id = -1 → 匿名访客，只返回公共域（owner_id IS NULL），避免暴露所有用户个人域。
+        传真实 owner_id → 多租户隔离：只返回「公共域」+「本人私有域」，
         别人的私有域对其完全不可见。
         """
         out = []

@@ -16,7 +16,7 @@ def test_delete_extra_agent_then_protect_last(client, auth_headers, ws_id):
     assert r.json().get("deleted") == extra_id
 
     # 该域现在只剩 1 个运维 Agent，删除应被保护拒绝（400）
-    ops = [a for a in client.get(f"/agents?workspace_id={ws_id}").json()["agents"]
+    ops = [a for a in client.get(f"/agents?workspace_id={ws_id}", headers=auth_headers).json()["agents"]
            if a["kind"] == "ops"]
     assert len(ops) == 1, ops
     r = client.delete(f"/workspaces/{ws_id}/agents/{ops[0]['id']}", headers=auth_headers)
