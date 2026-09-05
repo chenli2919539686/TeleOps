@@ -100,6 +100,19 @@ def auth_headers(client):
     return {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
 
 
+@pytest.fixture(scope="session")
+def admin_headers(client):
+    """显式创建管理员用户并返回请求头（不依赖是否是第一个注册用户）。"""
+    username = "admin_pytest_" + uuid.uuid4().hex[:8]
+    password = "Admin123456"
+    from src.core import auth
+    auth.create_user(username, password, is_admin=True)
+    r = client.post("/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    return {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+
+
 @pytest.fixture
 def ws_id(client, auth_headers):
     """创建一个临时业务域，测试结束自动删除。"""

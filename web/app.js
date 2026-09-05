@@ -748,10 +748,12 @@ function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 checkHealth();
-checkAuth();
 setInterval(checkAuth, 30000);
 setInterval(checkHealth, 15000);
-loadWorkspaces();
+// 启动顺序：先同步登录身份（USER），再拉业务域列表并选中默认域。
+// 必须 await checkAuth —— 否则 loadWorkspaces 跑在身份确认之前，
+// 登录用户会默认落进列表第一个域（公共域 core-net），而不是自己的个人域。
+checkAuth().then(() => loadWorkspaces());
 
 // ================= 业务域 / Agent 作战室 =================
 let CURRENT_WS = null;
@@ -762,11 +764,33 @@ let WAR_AGENTS = {};   // 当前业务域内所有 Agent 索引：id -> {id,name
 function openModal(id) { const m = document.getElementById(id); if (m) m.classList.add("open"); }
 function closeModal(id) { const m = document.getElementById(id); if (m) m.classList.remove("open"); }
 
+function canMutateCurrentWs() {
+  if (!USER || !CURRENT_WS) return false;
+  const ws = WS_LIST.find(w => w.id === CURRENT_WS);
+  if (!ws) return false;
+  if (USER.is_admin) return true;
+  // 公共域（owner_id 为 null/undefined）只有 admin 可写
+  if (ws.owner_id == null) return false;
+  return ws.owner_id === USER.uid;
+}
+
+function updateWsControls() {
+  const mutable = canMutateCurrentWs();
+  const modeAuto = $("#wsModeAuto"), modeManual = $("#wsModeManual"), wsDel = $("#wsDelete");
+  if (modeAuto) { modeAuto.disabled = !mutable; modeAuto.title = mutable ? "" : "只读：非本域所有者或管理员"; }
+  if (modeManual) { modeManual.disabled = !mutable; modeManual.title = mutable ? "" : "只读：非本域所有者或管理员"; }
+  if (wsDel) { wsDel.style.display = mutable ? "" : "none"; }
+}
+
 async function loadWorkspaces() {
   try {
     const d = await (await apiFetch(`/workspaces`)).json();
     WS_LIST = d.workspaces || [];
-    if (!CURRENT_WS && WS_LIST.length) CURRENT_WS = WS_LIST[0].id;
+    if (!CURRENT_WS && WS_LIST.length) {
+      // 登录用户默认进入自己的个人域，避免一上来就改公共域
+      const personal = USER ? WS_LIST.find(w => w.owner_id === USER.uid) : null;
+      CURRENT_WS = personal ? personal.id : WS_LIST[0].id;
+    }
     renderWsTabs();
     if (CURRENT_WS) await renderOverview(CURRENT_WS);
   } catch (e) { $("#wsTabs").innerHTML = `<span class="empty-sm">业务域加载失败</span>`; }
@@ -791,14 +815,18 @@ async function renderOverview(wsId) {
     const d = await (await apiFetch(`/workspaces/${wsId}`)).json();
     $("#ovWsName").textContent = d.name || wsId;
     setWsModeUI(d.mode);
+    updateWsControls();
     WAR_AGENTS = {};
     (d.agents || []).forEach(a => { WAR_AGENTS[a.id] = a; });
     const dev = (d.agents || []).filter(a => a.kind === "dev");
     const ops = (d.agents || []).filter(a => a.kind === "ops");
     const devLocked = dev.length <= 1;   // 每个域至少保留 1 个研发 Agent
     const opsLocked = ops.length <= 1;   // 每个域至少保留 1 个运维 Agent
-    $("#warDev").innerHTML = dev.map(a => warCard(a, devLocked)).join("") + `<button class="war-add" data-kind="dev">＋ 创建研发 Agent</button>`;
-    $("#warOps").innerHTML = ops.map(a => warCard(a, opsLocked)).join("") + `<button class="war-add" data-kind="ops">＋ 创建运维 Agent</button>`;
+    const mutable = canMutateCurrentWs();
+    const devAdd = mutable ? `<button class="war-add" data-kind="dev">＋ 创建研发 Agent</button>` : "";
+    const opsAdd = mutable ? `<button class="war-add" data-kind="ops">＋ 创建运维 Agent</button>` : "";
+    $("#warDev").innerHTML = dev.map(a => warCard(a, devLocked, mutable)).join("") + devAdd;
+    $("#warOps").innerHTML = ops.map(a => warCard(a, opsLocked, mutable)).join("") + opsAdd;
     bindWarCards();
     refreshWarStatuses();
     renderWarLoop(wsId);
@@ -943,17 +971,18 @@ async function renderStreamTasks() {
     box.innerHTML = `<div class="empty">任务队列加载失败：${escapeHtml(e.message)}</div>`;
   }
 }
-function warCard(a, locked) {
+function warCard(a, locked, mutable) {
   const st = a.status || "idle";
   const stTxt = st === "idle" ? "待命" : st === "busy" ? "工作中" : st === "error" ? "异常" : st;
-  const del = locked ? "" :
-    `<button class="icon-btn war-del" data-del="${a.id}" title="删除 Agent">🗑</button>`;
+  const del = (mutable && !locked) ?
+    `<button class="icon-btn war-del" data-del="${a.id}" title="删除 Agent">🗑</button>` : "";
+  const edit = mutable ? `<button class="icon-btn" data-edit="${a.id}" title="改名 / 编辑">✎</button>` : "";
   return `<div class="war-card ${a.kind}" data-id="${a.id}">
     <div class="war-top"><span class="war-name">${a.name}</span><span class="status-dot ${st}"></span></div>
     <div class="war-id">${a.id} · ${stTxt}</div>
     <div class="war-scope">${(a.scope || []).map(s => `<span>${escapeHtml(s)}</span>`).join("")}</div>
     <div class="war-task" id="wartask-${a.id}" style="display:none"></div>
-    <div class="war-actions"><button class="icon-btn" data-edit="${a.id}" title="改名 / 编辑">✎</button>${del}</div>
+    <div class="war-actions">${edit}${del}</div>
     <div class="war-foot">⤢ 点击打开工作台</div>
   </div>`;
 }
@@ -1732,7 +1761,12 @@ async function submitLogin() {
       document.getElementById("loginModal").classList.remove("open");
       document.getElementById("loginPass").value = "";
       msgEl.textContent = "";
+      // 切换账号后必须重置当前业务域，否则新用户会停留在上一个账号的域里
+      // （尤其是公共域 core-net），造成"多用户共用一套 Agent"的错觉。
+      CURRENT_WS = null;
+      WS_LIST = [];
       checkAuth();
+      if (typeof loadWorkspaces === "function") await loadWorkspaces();
     } else {
       msgEl.textContent = d.detail || (loginMode === "login" ? "用户名或密码错误" : "注册失败（用户名可能已存在）");
     }

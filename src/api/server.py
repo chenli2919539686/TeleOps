@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.14"
+VERSION = "0.8.15"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -705,7 +705,8 @@ def auth_me(request: Request):
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
-    return {"username": user.get("sub"), "is_admin": user.get("is_admin", False)}
+    return {"username": user.get("sub"), "uid": user.get("uid"),
+            "is_admin": user.get("is_admin", False)}
 
 
 @app.post("/auth/logout")
@@ -1335,7 +1336,10 @@ def create_workspace(req: CreateWorkspaceReq, request: Request):
 
 
 @app.get("/workspaces/{ws_id}")
-def get_workspace(ws_id: str):
+def get_workspace(ws_id: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_visible_to(ws_id, user):
+        raise HTTPException(status_code=404, detail=f"业务域 {ws_id} 不存在")
     ws = ws_store.get(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"业务域 {ws_id} 不存在")
@@ -1343,14 +1347,20 @@ def get_workspace(ws_id: str):
 
 
 @app.put("/workspaces/{ws_id}/mode")
-def set_workspace_mode(ws_id: str, req: ModeReq):
+def set_workspace_mode(ws_id: str, req: ModeReq, request: Request):
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_writable_by(ws_id, user):
+        raise HTTPException(status_code=403, detail="无权修改该业务域")
     if not ws_store.update_mode(ws_id, req.mode):
         raise HTTPException(status_code=400, detail="业务域不存在或 mode 非法")
     return {"id": ws_id, "mode": req.mode}
 
 
 @app.post("/workspaces/{ws_id}/agents")
-def create_agent(ws_id: str, req: CreateAgentReq):
+def create_agent(ws_id: str, req: CreateAgentReq, request: Request):
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_writable_by(ws_id, user):
+        raise HTTPException(status_code=403, detail="无权在该业务域下创建 Agent")
     try:
         agent = ws_store.add_agent(ws_id, req.kind, req.name, req.scope, req.description, req.primary)
     except ValueError as e:
@@ -1359,7 +1369,10 @@ def create_agent(ws_id: str, req: CreateAgentReq):
 
 
 @app.put("/workspaces/{ws_id}/agents/{agent_id}")
-def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq):
+def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq, request: Request):
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_writable_by(ws_id, user):
+        raise HTTPException(status_code=403, detail="无权修改该业务域下的 Agent")
     if req.name:
         if not ws_store.rename_agent(ws_id, agent_id, req.name):
             raise HTTPException(status_code=404, detail="Agent 不存在")
@@ -1370,8 +1383,11 @@ def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq):
 
 
 @app.delete("/workspaces/{ws_id}")
-def delete_workspace(ws_id: str):
+def delete_workspace(ws_id: str, request: Request):
     """删除业务域（默认域受保护），并级联清理其下所有 Agent 实例。"""
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_writable_by(ws_id, user):
+        raise HTTPException(status_code=403, detail="无权删除该业务域")
     try:
         ok, msg = ws_store.delete_workspace(ws_id)
     except ValueError as e:
@@ -1382,7 +1398,10 @@ def delete_workspace(ws_id: str):
 
 
 @app.delete("/workspaces/{ws_id}/agents/{agent_id}")
-def delete_agent(ws_id: str, agent_id: str):
+def delete_agent(ws_id: str, agent_id: str, request: Request):
+    user = getattr(request.state, "user", None)
+    if not ws_store.is_writable_by(ws_id, user):
+        raise HTTPException(status_code=403, detail="无权删除该业务域下的 Agent")
     ok, msg = ws_store.delete_agent(ws_id, agent_id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)

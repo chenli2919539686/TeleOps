@@ -38,9 +38,9 @@ def test_ghost_domain_no_500(client, auth_headers):
 def test_mode_switch(client, auth_headers, ws_id):
     r = client.put(f"/workspaces/{ws_id}/mode", headers=auth_headers, json={"mode": "manual"})
     assert r.status_code == 200, r.text
-    assert client.get(f"/workspaces/{ws_id}").json()["mode"] == "manual"
+    assert client.get(f"/workspaces/{ws_id}", headers=auth_headers).json()["mode"] == "manual"
     client.put(f"/workspaces/{ws_id}/mode", headers=auth_headers, json={"mode": "auto"})
-    assert client.get(f"/workspaces/{ws_id}").json()["mode"] == "auto"
+    assert client.get(f"/workspaces/{ws_id}", headers=auth_headers).json()["mode"] == "auto"
 
 
 def test_messages_roundtrip(client, auth_headers, ws_id):
@@ -60,8 +60,8 @@ def test_messages_require_auth(client, ws_id):
     assert r.status_code == 401
 
 
-def test_delete_default_domain_protected(client, auth_headers):
-    r = client.delete("/workspaces/core-net", headers=auth_headers)
+def test_delete_default_domain_protected(client, admin_headers):
+    r = client.delete("/workspaces/core-net", headers=admin_headers)
     assert r.status_code == 400, f"默认域应受保护，实际 {r.status_code}"
 
 

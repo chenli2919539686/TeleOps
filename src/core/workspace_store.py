@@ -113,6 +113,40 @@ class WorkspaceStore:
         """返回某用户可见的业务域 id 集合（公共域 + 本人域），供 /agents 等接口做隔离过滤。"""
         return [w["id"] for w in self.list(owner_id=owner_id)]
 
+    def is_visible_to(self, ws_id: str, user: Optional[dict]) -> bool:
+        """当前用户是否有权查看该业务域。"""
+        w = db.query_one("SELECT owner_id FROM workspaces WHERE id=?", (ws_id,))
+        if not w:
+            return False
+        owner_id = w["owner_id"]
+        if owner_id is None:
+            return True  # 公共域对所有用户可见
+        if not user:
+            return False
+        if user.get("is_admin"):
+            return True
+        return owner_id == user.get("uid")
+
+    def is_writable_by(self, ws_id: str, user: Optional[dict]) -> bool:
+        """当前用户是否有权修改该业务域（增删改 agent / 改 mode / 删域）。
+
+        规则：
+        - 公共域（owner_id IS NULL）仅 admin 可写；
+        - 私有域仅 owner 本人可写；
+        - admin 可写任何域（管理需要）。
+        """
+        if not user:
+            return False
+        w = db.query_one("SELECT owner_id FROM workspaces WHERE id=?", (ws_id,))
+        if not w:
+            return False
+        if user.get("is_admin"):
+            return True
+        owner_id = w["owner_id"]
+        if owner_id is None:
+            return False  # 公共域仅 admin 可写
+        return owner_id == user.get("uid")
+
     def get(self, ws_id) -> Optional[dict]:
         w = db.query_one("SELECT * FROM workspaces WHERE id=?", (ws_id,))
         if not w:

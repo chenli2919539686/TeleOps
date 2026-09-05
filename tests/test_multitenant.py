@@ -92,3 +92,70 @@ def test_anonymous_only_sees_public_workspace(client):
     agents = client.get("/agents").json()["agents"]
     assert all(a["workspace_id"] == "core-net" for a in agents), \
         f"匿名不应看到个人域 Agent，实际 {agents}"
+
+
+def test_non_admin_cannot_mutate_public_workspace(client):
+    """普通用户（非 admin）只能读公共域 core-net，不能增删改其 Agent 或删域。"""
+    headers, _ = _register(client, "mtPub_" + uuid.uuid4().hex[:8])
+    # 不是第一个用户，所以不是 admin
+    me = client.get("/auth/me", headers=headers).json()
+    assert me.get("is_admin") is False
+
+    # 创建 Agent 应 403
+    r = client.post("/workspaces/core-net/agents", headers=headers,
+                    json={"kind": "ops", "name": "公共域新 Agent", "scope": ["compute"]})
+    assert r.status_code == 403, f"普通用户不应能在 core-net 创建 Agent: {r.text}"
+
+    # 获取一个现有 agent id 尝试修改/删除
+    agents = client.get("/workspaces/core-net", headers=headers).json()["agents"]
+    assert agents
+    aid = agents[0]["id"]
+    r = client.put(f"/workspaces/core-net/agents/{aid}", headers=headers,
+                   json={"name": "改名"})
+    assert r.status_code == 403, "普通用户不应能修改 core-net Agent"
+    r = client.delete(f"/workspaces/core-net/agents/{aid}", headers=headers)
+    assert r.status_code == 403, "普通用户不应能删除 core-net Agent"
+    r = client.put("/workspaces/core-net/mode", headers=headers, json={"mode": "manual"})
+    assert r.status_code == 403, "普通用户不应能修改 core-net mode"
+    r = client.delete("/workspaces/core-net", headers=headers)
+    assert r.status_code == 403, "普通用户不应能删除 core-net"
+
+
+def test_user_cannot_mutate_others_workspace(client):
+    """用户 A 不能操作用户 B 的私有业务域（包括看详情、增删改 Agent、删域）。"""
+    ha, _ = _register(client, "mtOwnA_" + uuid.uuid4().hex[:8])
+    hb, _ = _register(client, "mtOwnB_" + uuid.uuid4().hex[:8])
+    wb = [w for w in client.get("/workspaces", headers=hb).json()["workspaces"]
+          if w["owner_id"] is not None][0]
+
+    # A 看不到 B 的私有域详情
+    r = client.get(f"/workspaces/{wb['id']}", headers=ha)
+    assert r.status_code == 404, "不应看到他人私有域详情"
+
+    # A 不能在 B 的域里创建 Agent
+    r = client.post(f"/workspaces/{wb['id']}/agents", headers=ha,
+                    json={"kind": "ops", "name": "越权 Agent", "scope": ["compute"]})
+    assert r.status_code == 403, "不应能在他人域创建 Agent"
+
+    # A 不能删除 B 的域
+    r = client.delete(f"/workspaces/{wb['id']}", headers=ha)
+    assert r.status_code == 403, "不应能删除他人域"
+
+
+def test_user_can_mutate_own_workspace(client):
+    """用户在自己的私有域里可以正常增删改 Agent。"""
+    headers, uid = _register(client, "mtOwn_" + uuid.uuid4().hex[:8])
+    ws = [w for w in client.get("/workspaces", headers=headers).json()["workspaces"]
+          if w["owner_id"] == uid][0]
+
+    r = client.post(f"/workspaces/{ws['id']}/agents", headers=headers,
+                    json={"kind": "ops", "name": "我的运维 Agent", "scope": ["compute"]})
+    assert r.status_code in (200, 201), r.text
+    aid = r.json()["id"]
+
+    r = client.put(f"/workspaces/{ws['id']}/agents/{aid}", headers=headers,
+                   json={"name": "改名后"})
+    assert r.status_code == 200, r.text
+
+    r = client.delete(f"/workspaces/{ws['id']}/agents/{aid}", headers=headers)
+    assert r.status_code == 200, r.text
