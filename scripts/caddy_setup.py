@@ -78,6 +78,23 @@ def main() -> int:
             _print("跳过下载。如需启用 HTTPS，运行：python scripts/teleops_ctl.py caddy on")
             return 0
 
+    # 优先尝试本地 zip：用户浏览器下载后传入路径
+    import sys
+    local_zip = sys.argv[1] if len(sys.argv) > 1 else None
+    if local_zip:
+        zp = Path(local_zip)
+        if not zp.exists():
+            _print(f"本地 zip 不存在：{zp}")
+            return 1
+        if not _extract_caddy(zp, CADDY_EXE):
+            _print(f"解压失败：{zp}")
+            return 1
+        zp.unlink(missing_ok=True)
+        _print(f"Caddy 就绪（本地 zip 模式）→ {CADDY_EXE}")
+        _print("启用 HTTPS：python scripts/teleops_ctl.py caddy on")
+        return 0
+
+    # 尝试自动下载（GitHub release）
     TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     zip_tmp = TOOLS_DIR / "caddy_setup.zip"
 
@@ -91,13 +108,19 @@ def main() -> int:
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
             _print(f"该源失败：{last_err}")
-            zip_tmp.unlink(missing_ok=True)
+            if zip_tmp.exists():
+                zip_tmp.unlink(missing_ok=True)
     else:
-        _print("全部下载源失败")
-        _print("备用方案：winget install CaddyServer.Caddy")
-        _print("安装后 caddy_runner 会自动从 PATH/常见路径查找，无需手动拷贝")
+        _print("\n所有自动下载源均失败（可能是网络限速）")
+        _print("\n=== 手动安装方案 ===")
+        _print("1. 浏览器打开：https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_windows_amd64.zip")
+        _print("2. 保存到任意路径（如 C:/Users/Chenl/Downloads/caddy.zip）")
+        _print(f"3. 运行：python scripts/caddy_setup.py <刚才的路径>")
+        _print("\n=== 或者 winget 方案（需管理员）===")
+        _print("   winget install CaddyServer.Caddy")
+        _print("   （caddy_runner.py 自动从 PATH/常见路径查找）")
         if last_err:
-            _print(f"最后一次错误：{last_err}")
+            _print(f"\n最后一次错误：{last_err}")
         return 1
 
     _print("解压 caddy.exe ...")
