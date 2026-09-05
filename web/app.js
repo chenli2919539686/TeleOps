@@ -459,14 +459,24 @@ $("#streamStart").onclick = async () => {
 };
 
 $("#streamStop").onclick = async () => {
+  const stopBtn = $("#streamStop"), startBtn = $("#streamStart"), resetBtn = $("#streamReset");
+  stopBtn.disabled = true;   // 防连点，等后端确认
   try {
     const wsParam = `workspace_id=${encodeURIComponent(CURRENT_WS || "")}`;
-    await apiFetch(`/stream/stop?${wsParam}`, { method: "POST" });
-    $("#streamStop").disabled = true;
-    $("#streamReset").disabled = false;
-    $("#streamStart").disabled = false;
+    const r = await apiFetch(`/stream/stop?${wsParam}`, { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || ("HTTP " + r.status));
+    stopBtn.disabled = true;
+    if (resetBtn) resetBtn.disabled = false;
+    if (startBtn) startBtn.disabled = false;
     $("#liveTxt").textContent = "已停止";
-  } catch (e) { alert("停止失败：" + e.message); }
+    STREAM.started = false;
+    streamPoll(); // 立即同步一次状态，避免等 1.2s 轮询
+  } catch (e) {
+    alert("停止失败：" + e.message);
+    // 失败后恢复按钮，让下一轮 streamPoll 根据真实 running 状态重新决定
+    stopBtn.disabled = false;
+  }
 };
 
 $("#streamReset").onclick = async () => {
