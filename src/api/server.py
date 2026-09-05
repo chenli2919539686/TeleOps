@@ -83,10 +83,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- 安全：写接口 Token 鉴权（取代原先的零鉴权） ----------------
-# 设置环境变量 TELEOPS_API_TOKEN 后，所有 POST/PUT/DELETE/PATCH 必须携带
-#   Authorization: Bearer <token>   或   X-API-Token: <token>
-# 未设置该变量时（本地开发默认）完全开放，行为与旧版一致（向后兼容）。
+# ---------------- 安全：写接口鉴权 ----------------
+# 所有 POST/PUT/DELETE/PATCH 必须携带登录身份，两种方式：
+#   1) Authorization: Bearer <JWT>   （界面右上角登录，或 /auth/login 获取）
+#   2) X-API-Token / Bearer: <TELEOPS_API_TOKEN>  （服务级令牌，
+#      供 Alertmanager webhook_configs.bearer_token、告警生成器等外部系统使用）
+# GET 及 _PUBLIC_PATHS 中的路径不校验。
 API_TOKEN = os.environ.get("TELEOPS_API_TOKEN", "").strip()
 AUTH_REQUIRED = bool(API_TOKEN)
 _PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc",
