@@ -39,6 +39,11 @@ WORKSPACES_FILE = DATA_DIR / "workspaces.json"
 LLM_CONFIG_FILE = Path(os.environ.get("TELEOPS_LLM_CONFIG_FILE")
                        or str(DATA_DIR / "llm_config.json"))
 
+# 适配器真实连接配置（外部系统地址/凭据），按 adapter id 索引。
+# 不提交到 git（含凭据），示例见 data/adapters.example.json。
+ADAPTER_CONFIG_FILE = Path(os.environ.get("TELEOPS_ADAPTER_CONFIG_FILE")
+                           or str(DATA_DIR / "adapters.json"))
+
 # 模型配置默认值（.env / 环境变量 -> 运行时 llm_config.json）
 DEFAULT_LLM_PROVIDER = os.getenv("TELEOPS_LLM_PROVIDER", "deepseek")
 DEFAULT_LLM_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -93,6 +98,22 @@ def save_llm_config(cfg: dict):
     """保存运行时 LLM 配置到 data/llm_config.json。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LLM_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_adapter_configs() -> dict:
+    """读取适配器真实连接配置（data/adapters.json），按 adapter id 索引。
+
+    文件不存在或解析失败时返回空 dict（适配器自动回退 demo 模式）。
+    注意：本文件含外部系统凭据，不入库（见 .gitignore）。
+    """
+    try:
+        if ADAPTER_CONFIG_FILE.exists():
+            data = json.loads(ADAPTER_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        print(f"[config] 读取 {ADAPTER_CONFIG_FILE} 失败：{e}")
+    return {}
 
 
 # 兼容旧代码与测试：保留模块级 LLM_TRIAGE 常量（运行时配置优先）

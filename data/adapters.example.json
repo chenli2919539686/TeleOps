@@ -1,0 +1,17 @@
+{
+  "alert-zabbix": {
+    "base_url": "http://zabbix.example.com/api",
+    "api_token": "",
+    "user": "Admin",
+    "password": "",
+    "verify_ssl": false
+  },
+  "log-elk": {
+    "base_url": "http://elasticsearch.example.com:9200",
+    "index": "logs-*",
+    "api_key": "",
+    "user": "",
+    "password": "",
+    "verify_ssl": false
+  }
+}

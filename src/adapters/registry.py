@@ -11,11 +11,13 @@ from src.adapters.sample_adapters import (
     PrometheusAlertAdapter, LocalCMDBAdapter,
     LocalKnowledgeAdapter, LocalExecAdapter,
 )
+from src.adapters.real_adapters import ZabbixAlertAdapter, ELKLogAdapter
 from src.adapters.reserved_adapters import (
-    ZabbixAlertAdapter, IMasterAlertAdapter, ELKLogAdapter,
+    IMasterAlertAdapter,
     BlueKingCMDBAdapter, ITSMTicketAdapter, SSHExtExecAdapter,
     ConfluenceKnowledgeAdapter,
 )
+from src.config import load_adapter_configs
 from src.core.tool_registry import ToolRegistry
 
 
@@ -31,10 +33,12 @@ class AdapterRegistry:
         self.register(LocalCMDBAdapter())
         self.register(LocalKnowledgeAdapter())
         self.register(LocalExecAdapter(ToolRegistry()))
+        # 可真实对接的适配器（配置驱动 + demo 兜底）
+        cfgs = load_adapter_configs()
+        self.register(ZabbixAlertAdapter(cfgs.get("alert-zabbix")))
+        self.register(ELKLogAdapter(cfgs.get("log-elk")))
         # 预留（接口已设计、待接入）
-        self.register(ZabbixAlertAdapter())
         self.register(IMasterAlertAdapter())
-        self.register(ELKLogAdapter())
         self.register(BlueKingCMDBAdapter())
         self.register(ITSMTicketAdapter())
         self.register(SSHExtExecAdapter())

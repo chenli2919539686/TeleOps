@@ -15,7 +15,7 @@
 from typing import Any, Dict, List
 
 from src.adapters.base import (
-    AlertAdapter, LogAdapter, CMDBAdapter, TicketAdapter, ExecAdapter,
+    AlertAdapter, CMDBAdapter, TicketAdapter, ExecAdapter,
     KnowledgeAdapter, NORTH, SOUTH,
 )
 
@@ -27,21 +27,6 @@ def _reserved(system: str, what: str) -> Dict[str, Any]:
         "system": system,
         "note": f"接口已设计，待接入真实系统：{what}",
     }
-
-
-# --------------------------- 告警：Zabbix ---------------------------
-class ZabbixAlertAdapter(AlertAdapter):
-    id = "alert-zabbix"
-    name = "Zabbix 告警接入（预留）"
-    system = "Zabbix"
-    status = "reserved"
-    description = "对接 Zabbix 的 problem event webhook，转成内核 Alert。真实接入需配置 Zabbix API 地址与令牌。"
-
-    def healthcheck(self) -> Dict[str, Any]:
-        return _reserved(self.system, "Zabbix API（需 url + auth token）")
-
-    def parse_webhook(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return [_reserved(self.system, "Zabbix problem webhook -> 统一 Alert")]
 
 
 # --------------------------- 告警：华为 iMaster NCE ---------------------------
@@ -57,21 +42,6 @@ class IMasterAlertAdapter(AlertAdapter):
 
     def parse_webhook(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [_reserved(self.system, "iMaster NCE alarm -> 统一 Alert")]
-
-
-# --------------------------- 日志：ELK ---------------------------
-class ELKLogAdapter(LogAdapter):
-    id = "log-elk"
-    name = "ELK 日志接入（预留）"
-    system = "Elasticsearch / Logstash / Kibana"
-    status = "reserved"
-    description = "从 ES 拉取近期日志做 RAG 入库与故障定位。真实接入需 ES 地址与索引名。"
-
-    def healthcheck(self) -> Dict[str, Any]:
-        return _reserved(self.system, "ES _search API（需 url + index）")
-
-    def fetch_recent(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
-        return [_reserved(self.system, f"ES query='{query}' limit={limit} -> 日志切片")]
 
 
 # --------------------------- CMDB：蓝鲸 ---------------------------

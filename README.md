@@ -209,6 +209,14 @@ python app.py
 - **可观测性部署**：`docker compose --profile observability up -d` 一条命令拉起 Prometheus + Grafana，预置数据源与「TeleOps 运行概览」面板（QPS / 状态码 / 延迟分位 / 429 限流 / 任务·LLM 速率 / 业务实时 gauge / 运行时长），见 `deploy/README.md` 第 8 节。
 - 测试：新增 `tests/test_ratelimit.py` 3 项（登录档 429+Retry-After 且不牵连读档、写档超限 429 已放行请求正常、`/metrics`·`/health`·静态资源放行 + 指标入账）；**该轮全量 pytest 41 项全绿**（v0.7.1+ 增 Agent 删除 2 项、v0.7.2 增工具复用 3 项、v0.7.6 增 Mock 确定性 3 项与级联清理 1 项 → 现 50 项，同年 9 月再增告警降噪分层 11 项 → **现 61 项**，见 Phase 2 说明）。
 
+**v0.8.7 · 集成适配器落地（Zabbix 告警 / ELK 日志从 reserved → sample）**
+- **问题**：此前 11 个集成适配器中，Zabbix 告警与 ELK 日志还是 `reserved` 占位（调用只返回「待接入」标记），「连真实运维系统」仍停留在设计稿。
+- **Zabbix 告警适配器**（`alert-zabbix`，新增 `src/adapters/real_adapters.py`）：实现 `parse_webhook` 解析 Zabbix Webhook 媒体类型报文 → 统一 Alert（severity 数值 0-5 归一化）；实现 `fetch_problems()` 直接调 Zabbix JSON-RPC `problem.get` 拉活跃 problem event。配置 `data/adapters.json` 的 `base_url + api_token`（或 `user/password`）即切换真实连接，否则回退 demo fixture。
+- **ELK 日志适配器**（`log-elk`）：实现 `fetch_recent(query)` 调 Elasticsearch `_search`（query_string），把命中日志映射为 `{ts, host, level, message}` 切片；配置 `base_url + index` 即真实连接，支持 `api_key`（Bearer）或 basic auth。
+- **接线**：`config.py` 新增 `ADAPTER_CONFIG_FILE` + `load_adapter_configs()`（按 adapter id 索引，gitignored，示例 `data/adapters.example.json`）；`registry` 注入 per-id 配置；`reserved_adapters.py` 删除这两个类的占位实现。前端「🔌 接入层」卡片状态自动从「预留」变为「样板」。
+- 设计文档 `接入层设计.md` 新增「3.1 配置真实连接（配置驱动 + demo 兜底）」与两张适配器的状态更新。
+- 新增 `tests/test_adapters_real.py` 11 项（webhook 解析 / demo fixture / 真实 API 映射 / severity 归一化 / 注册表状态）；**全量 pytest 88 项全绿**。
+
 **v0.8.6 · 自定义单价：任意模型精确计价**
 - **问题**：v0.8.5 的费用估算依赖内置定价表（9 个常见模型），切到表外模型（如其他厂商新模型）时只能按保守默认价粗估——token 数与预算护栏依然准确，但「今日估算费用」会有偏差。
 - **自定义单价**：`data/llm_config.json` 新增 `pricing` 字段，按 `{"provider.model": [输入, 缓存命中, 输出]}` 覆盖内置表（¥/百万 token）；也支持裸模型名 key（对任意 provider 的同名模型生效）与二元组 `[输入, 输出]` 简写。非法配置（字符串 / 负数 / 长度不对）一律跳过回退，绝不中断计费。
