@@ -788,8 +788,7 @@ async function loadWorkspaces() {
     WS_LIST = d.workspaces || [];
     if (!CURRENT_WS && WS_LIST.length) {
       // 登录用户默认进入自己的个人域，避免一上来就改公共域
-      const personal = USER ? WS_LIST.find(w => w.owner_id === USER.uid) : null;
-      CURRENT_WS = personal ? personal.id : WS_LIST[0].id;
+      CURRENT_WS = _pickDefaultWs(WS_LIST);
     }
     renderWsTabs();
     if (CURRENT_WS) await renderOverview(CURRENT_WS);
@@ -800,7 +799,9 @@ function renderWsTabs() {
   box.innerHTML = (WS_LIST.map(w => `<button class="ws-tab ${w.id === CURRENT_WS ? "active" : ""}" data-ws="${w.id}">${w.name}</button>`).join(""))
     + `<button class="ws-tab ws-tab-add" id="wsAddTab">＋ 接入接口</button>`;
   box.querySelectorAll(".ws-tab[data-ws]").forEach(b => b.onclick = async () => {
-    CURRENT_WS = b.dataset.ws; renderWsTabs(); await renderOverview(CURRENT_WS);
+    CURRENT_WS = b.dataset.ws; renderWsTabs();
+    await renderOverview(CURRENT_WS);
+    await refreshLinkedPanels();   // 需求板 / 消息栏随域切换，否则残留上一个域的数据
   });
   box.querySelectorAll(".ws-tab[data-ws]").forEach(b => {
     b.addEventListener("mouseenter", () => showWsHover(b, b.dataset.ws));
@@ -808,9 +809,85 @@ function renderWsTabs() {
   });
   $("#wsAddTab").onclick = openWsModal;
 }
+// ---------------- 自动刷新（v0.8.16）----------------
+// 背景：原有定时只覆盖状态灯(2.5s)/鉴权(30s)/健康(15s)/流视图(1.2s)，
+// 业务域列表、Agent 矩阵、需求板、工具库、消息栏都不会自己更新——
+// 多人协作时别人新建的域、改的 Agent 必须手动刷新才看得到。
+const AUTO_REFRESH_MS = 5000;
+
+function _uiBusy() {
+  // 有弹窗（登录/创建 Agent/编辑…）或 Agent 工作台抽屉打开时不刷新：
+  // 刷新会重建 DOM，会打断正在填的表单 / 正在看的工作台输出。
+  // 注意：openModal() 是把 open 加在 .modal-mask 上（不是内层的 .modal）。
+  if (document.querySelector(".modal-mask.open")) return true;
+  const wb = document.getElementById("wbDrawer");
+  return !!(wb && wb.classList.contains("open"));
+}
+
+function _pickDefaultWs(list) {
+  const personal = USER ? list.find(w => w.owner_id === USER.uid) : null;
+  return personal ? personal.id : (list.length ? list[0].id : null);
+}
+
+// 业务域列表：只在 id 集合变化时重建 tabs，避免定时器无谓重建 DOM 打断 hover；
+// 当前域若已被删除/对当前身份不可见，自动回退到可用域。
+async function refreshWsListIfChanged() {
+  try {
+    const d = await (await apiFetch(`/workspaces`)).json();
+    const next = d.workspaces || [];
+    let changed = (WS_LIST || []).map(w => w.id).join(",") !== next.map(w => w.id).join(",");
+    if (CURRENT_WS && !next.some(w => w.id === CURRENT_WS)) {
+      CURRENT_WS = _pickDefaultWs(next);   // 当前域被删或不可见 → 回退
+      changed = true;
+    }
+    WS_LIST = next;
+    if (!CURRENT_WS && WS_LIST.length) { CURRENT_WS = _pickDefaultWs(WS_LIST); changed = true; }
+    if (changed) renderWsTabs();
+  } catch (e) { /* 后端抖动，下一轮再试 */ }
+}
+
+// 需求板 / 消息栏都按 CURRENT_WS 取数，切域或换账号后必须重刷，否则残留旧域数据
+async function refreshLinkedPanels() {
+  try {
+    if ($("#view-board") && $("#view-board").classList.contains("active")) await renderBoard();
+    const drawer = document.getElementById("msgDrawer");
+    if (drawer && drawer.classList.contains("open")) await loadDrawer();
+  } catch (e) {}
+}
+
+async function refreshCurrentView() {
+  if (_uiBusy()) return;
+  await refreshWsListIfChanged();
+  const v = document.querySelector(".view.active");
+  if (!v) return;
+  try {
+    switch (v.id) {
+      case "view-overview":
+        // silent=true：自动刷新失败时不替换成「加载失败」，保留画面等下一轮
+        if (CURRENT_WS) await renderOverview(CURRENT_WS, true); else await loadWorkspaces();
+        break;
+      case "view-board": await renderBoard(); break;
+      case "view-tools": await renderTools(); break;
+      // view-topo（有拖拽布局）/ view-integ（适配器静态配置）不自动刷，避免打断；
+      // view-stream / view-loop 有自己的 streamPoll(1.2s)，不重复刷。
+    }
+  } catch (e) {}
+  await refreshLinkedPanels();
+}
+
+// 身份变更（登录/登出）后统一走这里：清域态 → 等身份确认 → 重拉域 → 刷联动面板
+async function reloadForIdentityChange() {
+  CURRENT_WS = null;
+  WS_LIST = [];
+  WAR_AGENTS = {};
+  await checkAuth();        // 内部 await refreshMe() 才拿到 USER，必须先等它完成
+  await loadWorkspaces();   // 按 USER.uid 选默认域
+  await refreshLinkedPanels();
+}
+
 async function loadOverview() { if (CURRENT_WS) await renderOverview(CURRENT_WS); else await loadWorkspaces(); }
 
-async function renderOverview(wsId) {
+async function renderOverview(wsId, silent = false) {
   try {
     const d = await (await apiFetch(`/workspaces/${wsId}`)).json();
     $("#ovWsName").textContent = d.name || wsId;
@@ -832,6 +909,7 @@ async function renderOverview(wsId) {
     renderWarLoop(wsId);
     if (document.getElementById("msgDrawer").classList.contains("open")) loadDrawer();
   } catch (e) {
+    if (silent) return;   // 自动刷新失败：保留现有内容，下一轮再试，避免网络抖动造成闪烁
     // 错误只显示在画布区，不销毁侧栏与容器，避免切回即空白
     $("#warDev").innerHTML = `<div class="empty">作战室加载失败：${escapeHtml(e.message)}</div>`;
     $("#warOps").innerHTML = "";
@@ -1763,10 +1841,9 @@ async function submitLogin() {
       msgEl.textContent = "";
       // 切换账号后必须重置当前业务域，否则新用户会停留在上一个账号的域里
       // （尤其是公共域 core-net），造成"多用户共用一套 Agent"的错觉。
-      CURRENT_WS = null;
-      WS_LIST = [];
-      checkAuth();
-      if (typeof loadWorkspaces === "function") await loadWorkspaces();
+      // 注意：必须 await checkAuth()（其内部 await refreshMe 才拿到 USER），
+      // 否则 loadWorkspaces 跑在身份确认前，USER 还是 null 又落回公共域。
+      await reloadForIdentityChange();
     } else {
       msgEl.textContent = d.detail || (loginMode === "login" ? "用户名或密码错误" : "注册失败（用户名可能已存在）");
     }
@@ -1789,21 +1866,16 @@ async function logout() {
     } catch (e) { /* 服务端不可达也不阻塞本地登出 */ }
   }
   setJwt("", null);
-  // 清空内存态的业务数据，避免登出后残留上一个用户的 Agent 矩阵 / 业务域
-  CURRENT_WS = null;
-  WS_LIST = [];
   AGENTS.ops = [];
   AGENTS.dev = [];
-  WAR_AGENTS = {};
   // 清空作战室 / 消息栏 / 工具库等面板内容
   const clearIds = ["warRoomGrid", "warDevGrid", "msgList", "toolList", "kbList", "topoGraph", "overviewPanel"];
   clearIds.forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.innerHTML = "";
   });
-  checkAuth();
-  // 重新拉取业务域列表（此时无登录态，会被引导到登录页或只剩公共域）
-  if (typeof loadWorkspaces === "function") loadWorkspaces();
+  // 统一走「身份变更 → 全量重载」：清域态 → 等身份确认 → 重拉业务域 → 刷联动面板
+  await reloadForIdentityChange();
 }
 
 function syncLoginTabs() {
@@ -1884,4 +1956,12 @@ $("#wsDelete").onclick = deleteWorkspace;
 
 // 状态灯定时刷新（与后端 registry 实时 status 同步）
 setInterval(refreshWarStatuses, 2500);
+
+// ---- 自动刷新注册（放文件末尾：等 AUTO_REFRESH_MS / refreshCurrentView 都初始化完）----
+// 当前视图自动刷新（默认 5s）：多人协作时别人改动的内容无需手动刷新。
+setInterval(refreshCurrentView, AUTO_REFRESH_MS);
+// 标签页重新可见时立即刷一次（切回浏览器不用等下一个周期）
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshCurrentView();
+});
 
