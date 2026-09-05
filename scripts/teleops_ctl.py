@@ -367,11 +367,13 @@ def cmd_caddy(action: str = "status") -> None:
     off    停止 Caddy
     status 查看是否在运行
     """
-    # 延迟导入避免硬依赖
+    # 延迟导入避免硬依赖（同目录脚本，不用包路径）
     try:
-        from scripts.caddy_runner import (
-            ensure_caddy_binary, caddy_start as _run, caddy_status as _st, caddy_stop,
-        )
+        import caddy_runner
+        _run = caddy_runner.caddy_start
+        _st = caddy_runner.caddy_status
+        _stop = caddy_runner.caddy_stop
+        ensure_caddy_binary = caddy_runner.ensure_caddy_binary
     except ImportError as e:
         _err(f"caddy_runner 模块未就绪: {e}")
         _info("请先运行 python scripts/caddy_setup.py 完成一次性部署")
@@ -388,7 +390,7 @@ def cmd_caddy(action: str = "status") -> None:
         return
 
     if action == "off":
-        if caddy_stop():
+        if _stop():
             _ok("Caddy 已停止")
         else:
             _warn("Caddy 未运行或停止失败")
@@ -430,7 +432,9 @@ def main() -> int:
     firewall_p = sub.add_parser("firewall", help="防火墙白名单（需管理员）：on 放行 RFC1918 / off 删除 / status 查看")
     firewall_p.add_argument("firewall_action", choices=["on", "off", "status"], nargs="?",
                             default="on", help="操作类型（默认 on）")
-    sub.add_parser("caddy", help="Caddy HTTPS 反代管理：on / off / status")
+    caddy_p = sub.add_parser("caddy", help="Caddy HTTPS 反代管理：on / off / status")
+    caddy_p.add_argument("caddy_action", choices=["on", "off", "status"], nargs="?",
+                         default="status", help="操作类型（默认 status）")
     sub.add_parser("toggle", help="运行中则停，停则起")
 
     args = parser.parse_args()
@@ -444,7 +448,7 @@ def main() -> int:
         "logs": lambda: cmd_logs(50),
         "url": cmd_url,
         "firewall": lambda: cmd_firewall(args.firewall_action),
-        "caddy": lambda: cmd_caddy(),
+        "caddy": lambda: cmd_caddy(args.caddy_action),
         "toggle": cmd_toggle,
     }
     handlers[cmd]()
