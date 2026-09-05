@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.17"
+VERSION = "0.8.18"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -334,7 +334,30 @@ registry.ws_store = ws_store   # 让 registry.set_status 能持久化到 SQLite
 board = RequirementBoard()
 dispatch_mode = {"value": "auto"}   # 自动 / 手动，可经 /dispatch/mode 切换
 adapters = AdapterRegistry()        # 外部系统适配器注册表（含预留接口）
-stream = AlertStream()              # 模拟告警流水线（持续监控演示），处置回调在 start 时注入
+# 模拟告警流水线（持续监控演示），处置回调在 start 时注入。
+# v0.8.18 起按业务域隔离：每个域一条独立流水线，A 域启动不影响 B 域，
+# 解决「一台机器启动、所有人（含 admin）界面都跟着跑且停不下来」的全局单例问题。
+_streams: Dict[str, AlertStream] = {}
+_streams_lock = threading.Lock()
+_STREAM_GLOBAL_KEY = "__global__"   # 兼容旧调用（不传 workspace_id）的全局槽位
+
+
+def _stream_of(ws_id: Optional[str]) -> AlertStream:
+    """取（或惰性建）某业务域专属的告警流水线实例。"""
+    key = ws_id or _STREAM_GLOBAL_KEY
+    with _streams_lock:
+        if key not in _streams:
+            _streams[key] = AlertStream()
+        return _streams[key]
+
+
+def _stream_key_visible(ws_id: Optional[str], request: Request) -> bool:
+    """流水线槽位对当前用户是否可见（不传 ws_id 的全局槽位对所有人可见，
+    与旧版行为一致；具体域沿用业务域可见性规则，防止越权窥探他人域的处置流）。"""
+    if not ws_id:
+        return True
+    user = getattr(request.state, "user", None)
+    return ws_store.is_visible_to(ws_id, user)
 
 
 # ---------------- 异步任务（让 Agent 运行时 busy 态可被前端实时轮询看到） ----------------
@@ -1009,11 +1032,29 @@ def _stream_make_processor(ws_id, ops_id, mode):
 
 
 @app.post("/stream/start")
-def stream_start(req: StreamStartReq):
-    """启动模拟告警流水线：自动循环播放剧本，Agent 持续处置不停摆。"""
+def stream_start(req: StreamStartReq, request: Request):
+    """启动模拟告警流水线：自动循环播放剧本，Agent 持续处置不停摆。
+
+    v0.8.18：流水线按业务域隔离——req.workspace_id 决定启动哪条流，
+    且要求当前用户对该域有写权限（公共域仅 admin、私有域仅 owner、匿名 403），
+    与 Agent 增删改同一套多租户规则。启动者用户名记入 status 供前端展示。
+    """
+    # 域存在性 + 写权限：看不见的域直接 404（不暴露存在），看得见但没写权 403
+    if req.workspace_id and not ws_store.is_visible_to(
+            req.workspace_id, getattr(request.state, "user", None)):
+        raise HTTPException(status_code=404, detail="业务域不存在")
+    user = getattr(request.state, "user", None)
+    if req.workspace_id and not ws_store.is_writable_by(req.workspace_id, user):
+        raise HTTPException(
+            status_code=403,
+            detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
+    stream = _stream_of(req.workspace_id)
     if stream.running:
-        raise HTTPException(status_code=409,
-                            detail="告警流已在运行，请先停止（/stream/stop）再启动")
+        started_by = stream.status().get("started_by") or "其他人"
+        raise HTTPException(
+            status_code=409,
+            detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
+                   "请先停止再启动")
     if req.profile not in ("mixed", "story"):
         raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
     if req.mode and req.mode not in ("auto", "manual"):
@@ -1024,58 +1065,92 @@ def stream_start(req: StreamStartReq):
         raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
     ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
     stream._process = _stream_make_processor(req.workspace_id, ops_id, mode)
+    started_by = (user or {}).get("username") or "匿名"
     stream.start(playlist, profile=req.profile,
-                 interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id)
+                 interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
+                 started_by=started_by)
     return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
-            "mode": mode, "playlist_len": len(playlist), "detail": stream.status()}
+            "mode": mode, "playlist_len": len(playlist),
+            "workspace_id": req.workspace_id,
+            "started_by": started_by, "detail": stream.status()}
 
 
 @app.post("/stream/stop")
-def stream_stop():
-    """停止流水线（幂等），返回最终统计。"""
+def stream_stop(request: Request, workspace_id: Optional[str] = None):
+    """停止流水线（幂等），返回最终统计。
+
+    v0.8.18：按 workspace_id 停对应域的流（不传则停全局槽位）；写权限同启动，
+    保证「谁的地盘谁能停」，admin 可停任何域（管理需要）。
+    """
+    if workspace_id and not ws_store.is_visible_to(
+            workspace_id, getattr(request.state, "user", None)):
+        raise HTTPException(status_code=404, detail="业务域不存在")
+    if workspace_id and not ws_store.is_writable_by(
+            workspace_id, getattr(request.state, "user", None)):
+        raise HTTPException(status_code=403, detail="无权停止该业务域的告警流水线")
+    stream = _stream_of(workspace_id)
     stream.stop()
     return {"status": "stopped", "detail": stream.status()}
 
 
 @app.post("/stream/reset-demo")
-def stream_reset_demo():
+def stream_reset_demo(request: Request):
     """重置演示数据：清掉流内沉淀的工具，让「缺工具→造工具」可反复重演。
 
     只删除「全局工具库」里非内置（保留 ping_host / restart_service）的工具行，
     不动各业务域自有工具与消息栏历史。
+    v0.8.18：清的是全局工具库 → 收紧为管理员专用，且先停掉所有域的流水线
+    （避免边跑边清造成处置报错刷屏）。
     """
-    stream.stop()
+    user = getattr(request.state, "user", None)
+    if not (user or {}).get("is_admin"):
+        raise HTTPException(status_code=403, detail="重置演示数据仅管理员可用")
+    with _streams_lock:
+        running = {k: s for k, s in _streams.items() if s.running}
+    for s in running.values():
+        s.stop()
     db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
                "AND (workspace_id IS NULL OR workspace_id='')")
     # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
     db.execute("DELETE FROM requirements")
-    return {"status": "reset",
+    return {"status": "reset", "stopped_streams": list(running.keys()),
             "tools": [r["name"] for r in db.query(
                 "SELECT name FROM tools ORDER BY name")]}
 
 
 @app.get("/stream/status")
-def stream_status():
-    """流水线运行状态 + 累计统计（前端秒级轮询）。"""
-    return stream.status()
+def stream_status(request: Request, workspace_id: Optional[str] = None):
+    """流水线运行状态 + 累计统计（前端秒级轮询）。
+
+    v0.8.18：按 workspace_id 查对应域的流；越权查看他人域 → 404（不暴露存在）。
+    """
+    if not _stream_key_visible(workspace_id, request):
+        raise HTTPException(status_code=404, detail="业务域不存在")
+    return _stream_of(workspace_id).status()
 
 
 @app.get("/stream/feed")
-def stream_feed(after: int = 0):
+def stream_feed(after: int = 0, request: Request = None,
+                workspace_id: Optional[str] = None):
     """增量拉取处置流水（seq > after），供前端像监控大屏一样滚动渲染。"""
-    return {"items": stream.feed(after=after)}
+    if not _stream_key_visible(workspace_id, request):
+        raise HTTPException(status_code=404, detail="业务域不存在")
+    return {"items": _stream_of(workspace_id).feed(after=after)}
 
 
 @app.get("/stream/tasks")
-def stream_tasks(limit: int = 50, agent_id: Optional[str] = None):
+def stream_tasks(limit: int = 50, agent_id: Optional[str] = None,
+                 request: Request = None, workspace_id: Optional[str] = None):
     """作战室任务队列：把流水线告警按「分配运维 Agent → 处置 → 闭环」可视化。
 
     可选 agent_id 过滤只看某 Agent 的任务；limit 控制返回最近 N 条。
     """
-    items = stream.tasks(limit=limit)
+    if not _stream_key_visible(workspace_id, request):
+        raise HTTPException(status_code=404, detail="业务域不存在")
+    items = _stream_of(workspace_id).tasks(limit=limit)
     if agent_id:
         items = [t for t in items if t.get("assigned_agent") == agent_id]
-    return {"tasks": items, "running": stream.running}
+    return {"tasks": items, "running": _stream_of(workspace_id).running}
 
 
 # ---------------- 多 Agent 矩阵 + 消息栏（人工 / 自动派发闭环） ----------------

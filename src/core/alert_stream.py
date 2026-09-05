@@ -135,6 +135,7 @@ class AlertStream:
         self._interval_ms = 1200
         self._loop = True
         self._ops_id: Optional[str] = None    # 流水线默认归属的运维 Agent
+        self._started_by: str = ""            # 启动者用户名（多人协作时提示由谁启动）
         self._current: Optional[dict] = None
         self._last_error: Optional[str] = None
         self.TASK_MAX = 200                    # 任务环形上限，防内存膨胀
@@ -142,10 +143,12 @@ class AlertStream:
     # ---------- 控制 ----------
     def start(self, playlist: List[dict], profile: str = "mixed",
               interval_ms: int = 1200, loop: bool = True,
-              ops_agent_id: Optional[str] = None) -> bool:
+              ops_agent_id: Optional[str] = None,
+              started_by: str = "") -> bool:
         """启动播放器。已在运行则返回 False。
 
         ops_agent_id：本场流水线处置告警归属的运维 Agent（用于作战室任务队列展示）。
+        started_by：启动者用户名（多租户隔离后前端展示「由谁启动」，便于多人协作）。
         """
         with self._lock:
             if self._running:
@@ -161,6 +164,7 @@ class AlertStream:
             self._interval_ms = max(200, int(interval_ms))
             self._loop = bool(loop)
             self._ops_id = ops_agent_id
+            self._started_by = started_by
             self._running = True
             self._started_at = time.time()
             self._current = None
@@ -353,6 +357,7 @@ class AlertStream:
                 "loop": bool(self._loop),
                 "rounds": self._rounds,
                 "queue_remaining": remaining,
+                "started_by": self._started_by,
                 "started_at": (datetime.fromtimestamp(self._started_at)
                                .isoformat(timespec="seconds")
                                if self._started_at else ""),

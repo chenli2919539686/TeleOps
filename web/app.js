@@ -320,8 +320,10 @@ function renderStreamLivebar(s) {
   const meta = $("#liveMeta");
   if (meta) {
     const modeTxt = s.mode === "manual" ? "✋ 手动" : (s.running || STREAM.started ? "⚡ 自动" : "—");
+    // 由谁启动：多人协作时知道这条流是谁拉起来的（域内隔离后不会互相串台）
+    const by = s.started_by && s.running ? ` · 由 <b>${escapeHtml(s.started_by)}</b> 启动` : "";
     meta.innerHTML = `<b>${escapeHtml(STREAM.profile || streamProfileLabel(s.profile || "story"))}</b>` +
-      ` · 域 <b>${escapeHtml(STREAM.wsName)}</b> · 处置 <code>${escapeHtml(STREAM.ops || s.ops_agent_id || "自动路由")}</code>` +
+      ` · 域 <b>${escapeHtml(STREAM.wsName)}</b>${by} · 处置 <code>${escapeHtml(STREAM.ops || s.ops_agent_id || "自动路由")}</code>` +
       ` · ${modeTxt} · 间隔 ${s.interval_ms || 1200}ms · 轮次 ${s.rounds || 0}` +
       ` · 剩余 ${s.queue_remaining ?? 0} 条`;
   }
@@ -384,14 +386,20 @@ function appendStreamRow(it) {
 async function streamPoll() {
   const view = document.getElementById("view-stream");
   if (!view || !view.classList.contains("active")) return;
+  const wsParam = `workspace_id=${encodeURIComponent(CURRENT_WS || "")}`;
   try {
-    const s = await (await apiFetch(`/stream/status`)).json();
+    const s = await (await apiFetch(`/stream/status?${wsParam}`)).json();
     const st = s.stats || {};
     renderStreamStats(s);
     renderStreamLivebar(s);
+    // 停止/启动按钮随真实运行状态联动（v0.8.18）：
+    // 之前停止按钮只有本机点过启动才解锁，别人（含管理员）看到 LIVE 却停不掉。
+    const stopBtn = $("#streamStop"), startBtn = $("#streamStart");
+    if (stopBtn) stopBtn.disabled = !s.running;
+    if (startBtn) startBtn.disabled = !!s.running;
     // 长时间离开页面后回流补齐（环形缓冲 300，最多可重放 250 条差额）
     if (s.running && st.ingested - STREAM.seen > 250) { STREAM.seen = 0; clearStreamFeed("正在追赶最近 300 条处置流水…"); }
-    const f = await (await apiFetch(`/stream/feed?after=${STREAM.seen}`)).json();
+    const f = await (await apiFetch(`/stream/feed?after=${STREAM.seen}&${wsParam}`)).json();
     const items = f.items || [];
     if (items.length) {
       STREAM.seen = Math.max(...items.map(i => i.seq));
@@ -406,6 +414,19 @@ function streamEnter() {
   if (!STREAM.inited) { STREAM.inited = true; clearStreamFeed(); }
   if (!STREAM.tick) STREAM.tick = setInterval(streamPoll, 1200);
   streamPoll();
+}
+
+// 切换业务域 / 切换账号后调用：告警流按域隔离（v0.8.18），
+// 必须清掉旧域的增量水位与画面，否则新域会从旧 seq 续播、串台。
+function resetStreamView(tip) {
+  STREAM.seen = 0; STREAM.started = false;
+  STREAM.ops = ""; STREAM.mode = "auto"; STREAM.profile = ""; STREAM.wsName = "全局";
+  const box = $("#streamFeed");
+  if (box) box.innerHTML = `<div class="empty">${escapeHtml(tip || "已切换业务域，显示当前域的流水线状态…")}</div>`;
+  const stopBtn = $("#streamStop"), startBtn = $("#streamStart");
+  if (stopBtn) stopBtn.disabled = true;   // 下一轮 streamPoll 会按真实运行状态解锁
+  if (startBtn) startBtn.disabled = false;
+  if (document.getElementById("view-stream")?.classList.contains("active")) streamPoll();
 }
 
 // ---- 控制：启动 / 停止 / 重置 ----
@@ -439,9 +460,11 @@ $("#streamStart").onclick = async () => {
 
 $("#streamStop").onclick = async () => {
   try {
-    await apiFetch(`/stream/stop`, { method: "POST" });
+    const wsParam = `workspace_id=${encodeURIComponent(CURRENT_WS || "")}`;
+    await apiFetch(`/stream/stop?${wsParam}`, { method: "POST" });
     $("#streamStop").disabled = true;
     $("#streamReset").disabled = false;
+    $("#streamStart").disabled = false;
     $("#liveTxt").textContent = "已停止";
   } catch (e) { alert("停止失败：" + e.message); }
 };
@@ -801,7 +824,9 @@ function renderWsTabs() {
   box.innerHTML = (WS_LIST.map(w => `<button class="ws-tab ${w.id === CURRENT_WS ? "active" : ""}" data-ws="${w.id}">${w.name}</button>`).join(""))
     + `<button class="ws-tab ws-tab-add" id="wsAddTab">＋ 接入接口</button>`;
   box.querySelectorAll(".ws-tab[data-ws]").forEach(b => b.onclick = async () => {
+    if (b.dataset.ws === CURRENT_WS) return;   // 点当前域：无需整套重载
     CURRENT_WS = b.dataset.ws; renderWsTabs();
+    resetStreamView();   // 告警流按域隔离：切域必须重置增量水位，否则旧域 seq 串台
     await renderOverview(CURRENT_WS);
     await refreshLinkedPanels();   // 需求板 / 消息栏随域切换，否则残留上一个域的数据
   });
@@ -887,6 +912,7 @@ async function reloadForIdentityChange() {
     CURRENT_WS = null;
     WS_LIST = [];
     WAR_AGENTS = {};
+    resetStreamView("身份已变更，显示当前域的流水线状态…");
     await checkAuth();            // 内部 await refreshMe() 才拿到 USER，必须先等它完成
     await loadWorkspaces(true);   // force=true：按 USER.uid 重新选默认域，不被竞态覆盖
     await refreshLinkedPanels();
@@ -1025,7 +1051,7 @@ async function renderStreamTasks() {
   const liveTxt = document.getElementById("taskLiveTxt");
   if (!box) return;
   try {
-    const r = await apiFetch(`/stream/tasks?limit=30`);
+    const r = await apiFetch(`/stream/tasks?limit=30&workspace_id=${encodeURIComponent(CURRENT_WS || "")}`);
     const d = await r.json();
     const tasks = d.tasks || [];
     if (live) {
