@@ -1655,6 +1655,9 @@ async function checkAuth() {
     const banner = document.getElementById("authBanner");
     if (d.auth_required && !JWT && !TOKEN) banner.style.display = "flex";
     else banner.style.display = "none";
+    // 同步服务端注册邀请码开关
+    INVITE_REQUIRED = !!d.invite_required;
+    syncLoginTabs();   // 邀请码开关状态可能变化，刷新 tab UI 显隐
     // 服务端支持 JWT 且本地有凭据 → 校验并恢复会话
     if (d.jwt_enabled && JWT) refreshMe();
   } catch (e) {}
@@ -1662,6 +1665,7 @@ async function checkAuth() {
 
 // ================= 登录 / 注册 / 登出（JWT） =================
 let loginMode = "login";   // login | register
+let INVITE_REQUIRED = false;  // 服务端 TELEOPS_INVITE_CODE 是否启用（register tab 据此切显隐）
 
 function renderAuthArea() {
   const box = document.getElementById("authArea");
@@ -1699,16 +1703,23 @@ async function refreshMe() {
 async function submitLogin() {
   const u = (document.getElementById("loginUser").value || "").trim();
   const p = document.getElementById("loginPass").value || "";
+  const inviteEl = document.getElementById("loginInvite");
+  const invite = (inviteEl && inviteEl.value || "").trim();
   const msgEl = document.getElementById("loginMsg");
   if (!u || !p) { msgEl.textContent = "请输入用户名和密码"; return; }
   if (loginMode === "register" && p.length < 8) { msgEl.textContent = "注册密码至少 8 位"; return; }
+  if (loginMode === "register" && INVITE_REQUIRED && !invite) {
+    msgEl.textContent = "请输入注册邀请码"; return;
+  }
   msgEl.textContent = "请求中…";
   _suppressLoginPrompt = true;
   try {
     const path = loginMode === "login" ? "/auth/login" : "/auth/register";
+    const body = { username: u, password: p };
+    if (loginMode === "register" && INVITE_REQUIRED) body.invite_code = invite;
     const r = await fetch(API + path, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: u, password: p }),
+      body: JSON.stringify(body),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok && d.token) {
@@ -1752,6 +1763,12 @@ function syncLoginTabs() {
   document.getElementById("loginTitle").textContent = loginMode === "login" ? "🔐 登录" : "🆕 注册账号";
   document.getElementById("loginSubmit").textContent = loginMode === "login" ? "登录" : "注册并登录";
   document.getElementById("loginMsg").textContent = "";
+  // 注册邀请码：仅当切到「注册」且服务端开启时显示
+  const showInvite = loginMode === "register" && INVITE_REQUIRED;
+  const lab = document.getElementById("inviteCodeLabel");
+  const inp = document.getElementById("loginInvite");
+  if (lab) lab.style.display = showInvite ? "block" : "none";
+  if (inp) inp.style.display = showInvite ? "block" : "none";
 }
 document.querySelectorAll("#loginTabs .seg-btn").forEach(b =>
   b.onclick = () => { loginMode = b.dataset.tab; syncLoginTabs(); });

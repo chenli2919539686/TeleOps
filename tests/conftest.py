@@ -48,6 +48,29 @@ os.environ["TELEOPS_KB_DIR"] = str(_TMP_KB)
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.server import app             # noqa: E402
 from src.core import rate_limit as _rl     # noqa: E402
+from src.core.tool_registry import ToolRegistry  # noqa: E402
+from src.core import db                    # noqa: E402
+
+
+# 基线工具种子：conftest 已把磁盘 tools/*.py 拷到临时目录，这里同步把元数据落进 DB。
+# ping_host/restart_service 是 v0.3.x 引入的核心示例工具，test_tools_baseline、
+# test_agents_dispatch、test_real_loop 等用例都依赖它们。
+def _seed_baseline_tools():
+    registry = ToolRegistry()
+    seed = [
+        {"name": "ping_host", "executor": "net_ping.py",
+         "risk": "low", "require_human_approval": False,
+         "description": "网络连通性探测（ping 主机）"},
+        {"name": "restart_service", "executor": "svc_restart.py",
+         "risk": "high", "require_human_approval": True,
+         "description": "服务重启（高危，需人工确认）"},
+    ]
+    for t in seed:
+        if not registry.get(t["name"]):
+            registry.add(t)
+
+
+_seed_baseline_tools()
 
 
 @pytest.fixture(autouse=True)

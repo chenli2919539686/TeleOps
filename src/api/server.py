@@ -64,8 +64,12 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.9"
+VERSION = "0.8.10"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
+
+# 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
+# 设了码=只有拿到码的人能注册；不设=保持原先无门槛注册（向后兼容）。
+INVITE_CODE = os.environ.get("TELEOPS_INVITE_CODE", "").strip()
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
 # 默认仅放行本地前端（8001）；生产/Spaces 部署请通过 TELEOPS_CORS_ORIGINS 显式放行域名，
@@ -648,13 +652,15 @@ def metrics_endpoint():
 class AuthReq(BaseModel):
     username: str
     password: str
+    invite_code: str = ""  # 当服务端启用 TELEOPS_INVITE_CODE 时必填
 
 
 @app.get("/auth/status")
 def auth_status():
     """前端据此判断是否需要弹出登录提示（公开端点，不受鉴权中间件限制）。"""
     return {"auth_required": AUTH_REQUIRED, "jwt_enabled": True,
-            "users_exist": auth.user_count() > 0}
+            "users_exist": auth.user_count() > 0,
+            "invite_required": bool(INVITE_CODE)}  # 注册邀请码开关
 
 
 @app.post("/auth/register")
@@ -668,6 +674,10 @@ def auth_register(req: AuthReq):
         raise HTTPException(status_code=400, detail="用户名与密码必填")
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if INVITE_CODE and req.invite_code != INVITE_CODE:
+        # 邀请码开启但错配：拒绝注册。错误信息统一为「邀请码错误」，
+        # 不区分「未填」与「填错」，避免旁路探测（已知标准实践）。
+        raise HTTPException(status_code=403, detail="邀请码错误，请联系管理员获取")
     if auth.get_user(req.username):
         raise HTTPException(status_code=409, detail="用户名已存在")
     u = auth.create_user(req.username, req.password)
