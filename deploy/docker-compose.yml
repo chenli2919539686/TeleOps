@@ -20,9 +20,12 @@ services:
     environment:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       TELEOPS_API_TOKEN: ${TELEOPS_API_TOKEN:-}
+      TELEOPS_INVITE_CODE: ${TELEOPS_INVITE_CODE:-}
       TELEOPS_CORS_ORIGINS: ${TELEOPS_CORS_ORIGINS:-}
       TELEOPS_RATE_LIMIT: ${TELEOPS_RATE_LIMIT:-on}
       USE_CHROMA: ${USE_CHROMA:-0}
+      # 容器内显式对外监听，保证 Caddy（同 compose 网络）能反代到 backend:8000
+      TELEOPS_HOST: "0.0.0.0"
     expose:
       - "8000"
     healthcheck:
@@ -49,6 +52,8 @@ services:
     environment:
       # Caddyfile 内用 {env.TELEOPS_DOMAIN} 引用；localhost 走内部 CA 自签（本地自测）
       TELEOPS_DOMAIN: ${TELEOPS_DOMAIN:-localhost}
+      # Caddyfile 全局 email 选项引用，公网证书申请（Let's Encrypt）必须
+      TELEOPS_ACME_EMAIL: ${TELEOPS_ACME_EMAIL:-admin@localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

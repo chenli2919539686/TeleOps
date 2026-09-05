@@ -12,3 +12,5 @@ python-dotenv>=1.0
 fastapi>=0.110
 uvicorn>=0.27
 httpx>=0.27
+# 真实 Zabbix/ELK 适配器网络调用（real_adapters.py）；此前漏声明，补齐以统一依赖口径
+requests>=2.28

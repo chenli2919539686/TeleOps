@@ -5,6 +5,9 @@
 # - backend 单端口同时提供 API 与静态界面，全部反代到 backend:8000
 
 {
+    # 公网证书申请（Let's Encrypt）需要联系邮箱；非交互式容器环境必须在此给定，
+    # 否则 Caddy 首跑会卡在交互式询问。留空时回退占位值（生产请务必填真实邮箱）。
+    email {$TELEOPS_ACME_EMAIL:admin@localhost}
     servers {
         trusted_proxies static private_ranges
     }

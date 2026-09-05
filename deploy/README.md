@@ -58,9 +58,29 @@ docker compose -f deploy/docker-compose.yml logs -f
 ### B. 公网生产（真实域名）
 1. 准备一个域名，把 A 记录指向服务器**公网 IP**。
 2. `TELEOPS_DOMAIN=teleops.example.com`。
-3. 服务器**安全组 / 防火墙放行 80 与 443**（Let's Encrypt 验证与证书续期都需要 80）。
-4. 强烈建议设置 `TELEOPS_API_TOKEN`（开启写接口鉴权），并在前端「设置」里填入相同值。
-5. 启动后 Caddy 自动向 Let's Encrypt 申请证书并**自动续期**（证书存于 `caddy_data` volume）。
+3. `TELEOPS_ACME_EMAIL=you@example.com`：Let's Encrypt 证书申请邮箱（ACME 账户）。容器非交互环境必须给定，否则 Caddy 首跑会卡在交互式询问；Caddyfile 全局 `email` 选项已引用该变量。
+4. 服务器**安全组 / 防火墙放行 80 与 443**（Let's Encrypt 验证与证书续期都需要 80）。
+5. 强烈建议设置 `TELEOPS_API_TOKEN`（开启写接口鉴权），并在前端「设置」里填入相同值。
+6. 建议设置 `TELEOPS_INVITE_CODE`：非空时注册必须填邀请码，防公网被陌生人随意注册。
+7. 启动后 Caddy 自动向 Let's Encrypt 申请证书并**自动续期**（证书存于 `caddy_data` volume）。
+
+> 完整上线前检查见下方「公网上线前安全检查清单」。
+
+### 公网上线前安全检查清单
+
+把 Demo 放到公网前，逐项确认（任一未满足都可能被滥用或证书失败）：
+
+- [ ] **域名 A 记录**已指向服务器公网 IP，`ping 你的域名` 可达。
+- [ ] **安全组 / 防火墙放行 80 与 443**（80 用于 ACME 验证，缺一不可）；不要直接把 backend 的 8000 暴露到公网。
+- [ ] `TELEOPS_ACME_EMAIL` 已填真实邮箱，Caddy 能非交互申请 Let's Encrypt 证书。
+- [ ] `TELEOPS_API_TOKEN` 已设（写接口鉴权开启），且前端「设置」里填了相同值。
+- [ ] `TELEOPS_INVITE_CODE` 已设（关闭开放注册），避免公网被随意注册账号。
+- [ ] 若用 Grafana observability：`deploy/.env` 改强密码，并移除 compose 中 Grafana 匿名访问两行。
+- [ ] 备份：`docker volume ls | grep teleops` 确认 `teleops_data/kb/tools` 三个业务卷存在；重要数据定期 `docker run --rm -v teleops_data:/data -v $PWD/backup:/backup alpine cp -r /data /backup`。
+- [ ] 验证：`curl -I https://你的域名/health` 返回 200，且浏览器地址栏显示有效锁标（非自签警告）。
+
+> 说明：本项目鉴权为 JWT 多用户 + 写接口 Token 双层；SQLite 单副本、无组织级硬隔离，
+> 适合个人作品集 / 面试演示级别的对外展示，不建议作为承载真实生产告警的系统长期公网运行。
 
 ## 4. 密钥管理（不入库）
 

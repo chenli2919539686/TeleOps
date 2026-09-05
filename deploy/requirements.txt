@@ -10,6 +10,10 @@ openai>=1.0
 # 本项目代码基于 0.2.x API，装到 1.x 会直接 import 失败（CI 曾因此必挂）
 langgraph>=0.2,<0.3
 networkx>=3.0
+# 真实 Zabbix/ELK 适配器用 requests 做网络调用（real_adapters.py 内 import requests）。
+# 此前漏声明，Docker 镜像若配置真实接入会 ModuleNotFoundError；demo 模式为惰性导入不触发，
+# 但公网部署按「配置驱动 + demo 兜底」设计，必须随镜像预装。
+requests>=2.28
 
 # 可选：向量检索（知识库 RAG）。如需启用，取消注释并在 compose 中设 USE_CHROMA=1
 # chromadb>=0.5
