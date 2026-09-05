@@ -1,0 +1,54 @@
+# -*- coding: utf-8 -*-
+# TeleOps Caddy HTTPS 反代配置（v0.8.13）
+#
+# 用法：
+#   caddy run --config Caddyfile
+#   caddy stop --config Caddyfile
+#
+# 监听：443（HTTPS）/ 80（自动跳 HTTPS，可选）
+# 反代：本地 127.0.0.1:8000（TeleOps 后端 uvicorn）
+# 证书：Caddy internal 自签证书（首次访问浏览器提示「不安全」，点高级→继续即可）
+
+# LAN HTTPS 入口：所有网卡（含 192.168.x.x）都监听 443
+:443 {
+    tls internal
+
+    # 反代到本地后端
+    reverse_proxy 127.0.0.1:8000 {
+        # 保留 Host，便于后端按 Host 区分本地/局域网访问
+        header_up Host {host}
+        # 透传客户端真实 IP（Caddy 默认会带 X-Forwarded-For）
+        header_up X-Real-IP {remote_host}
+        # 长连接池
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+
+    # 安全头（Caddy 自带大部分，再补两条）
+    header {
+        # 防止 MIME 嗅探
+        X-Content-Type-Options "nosniff"
+        # 防 clickjacking
+        X-Frame-Options "DENY"
+        # 关闭 referrer
+        Referrer-Policy "no-referrer"
+        # 允许内嵌 WebSocket（若后续要加 /ws）
+        # Permissions-Policy 默认即可
+    }
+
+    # 日志：写到 data/caddy.log
+    log {
+        output file C:/Users/Chenl/WorkBuddy/2026-08-30-13-28-10/TeleOps/data/caddy.log {
+            roll_size 10MiB
+            roll_keep 3
+        }
+        level INFO
+    }
+}
+
+# 可选：80 端口强制跳 HTTPS（Caddy 默认会做，但显式更清晰）
+:80 {
+    redir https://{host}{uri} permanent
+}

@@ -25,3 +25,9 @@ hf_space_build/
 traces/
 # Node 依赖（前端截图脚本运行时下载）
 node_modules/
+# Caddy HTTPS 反代运行时二进制与下载缓存（caddy_setup.py 管理）
+tools/caddy.exe
+tools/*.zip
+# 后端 + Caddy PID 文件（运行期产物）
+data/.server.pid
+data/.caddy.pid
