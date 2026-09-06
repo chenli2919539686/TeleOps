@@ -43,6 +43,8 @@
         <button class="nav-item" data-view="topo"><span class="nav-ico">🕸️</span>拓扑视图</button>
         <button class="nav-item" data-view="tools"><span class="nav-ico">📦</span>工具库</button>
         <button class="nav-item" data-view="kb"><span class="nav-ico">📚</span>知识库</button>
+        <div class="nav-sep"></div>
+        <button class="nav-item" data-view="audit"><span class="nav-ico">🧾</span>操作审计</button>
       </nav>
 
       <div class="sidebar-foot">
@@ -291,6 +293,39 @@
         </div>
         <div class="kb-result" id="kbResult"></div>
       </section>
+
+      <!-- 操作审计（多租户问责） -->
+      <section class="view" id="view-audit">
+        <header class="view-head">
+          <h1>操作审计</h1>
+          <p>记录谁在何时对哪个业务域做了什么。管理员可查看全量；普通用户只能看到自己可见业务域的操作与自身的登录类记录。</p>
+        </header>
+        <div class="audit-bar">
+          <label class="audit-field">
+            <span>业务域</span>
+            <select id="auditWs"><option value="">全部可见域</option></select>
+          </label>
+          <label class="audit-field">
+            <span>条数</span>
+            <select id="auditLimit">
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <button class="ghost-btn" id="auditRefresh">🔄 刷新</button>
+          <span class="audit-scope" id="auditScope"></span>
+        </div>
+        <div class="audit-wrap">
+          <table class="audit-table">
+            <thead>
+              <tr><th>时间</th><th>操作人</th><th>动作</th><th>业务域</th><th>详情</th><th>结果</th><th>来源 IP</th></tr>
+            </thead>
+            <tbody id="auditBody"></tbody>
+          </table>
+          <div class="empty" id="auditEmpty">暂无审计记录</div>
+        </div>
+      </section>
     </main>
 
     <!-- 右侧消息抽屉 -->
@@ -506,6 +541,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.20"></script>
+  <script src="app.js?v=0.8.21"></script>
 </body>
 </html>

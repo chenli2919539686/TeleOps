@@ -64,7 +64,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.20"
+VERSION = "0.8.21"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -191,6 +191,32 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
 
 metrics.set_help("teleops_rate_limited_total", "被限流拒绝的请求数（按方法/路径段）")
 app.add_middleware(_RateLimitMiddleware)
+
+
+# ---------------- 审计辅助 ----------------
+def _client_ip(request: Request) -> Optional[str]:
+    """取客户端真实 IP（兼容 Caddy 反代 X-Forwarded-For）。"""
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def _actor_of(request: Request, fallback_username: str = None):
+    """返回 (actor_name, actor_id) 用于审计；未登录且未给 fallback 时记 anonymous。"""
+    user = getattr(request.state, "user", None)
+    if user:
+        return (user.get("sub") or "unknown", user.get("uid"))
+    if fallback_username:
+        return (fallback_username, None)
+    return ("anonymous", None)
+
+
+def _audit_write(request: Request, action: str, ws_id, detail, result="ok"):
+    """写类操作的审计便捷封装：从 request 取操作人、IP，落到 audit_log。"""
+    actor, actor_id = _actor_of(request)
+    db.audit(actor, action, workspace_id=ws_id, detail=detail, result=result,
+             actor_id=actor_id, ip=_client_ip(request))
 
 
 # ---------------- LLM 运行时配置（前端设置面板可热更新） ----------------
@@ -687,7 +713,7 @@ def auth_status():
 
 
 @app.post("/auth/register")
-def auth_register(req: AuthReq):
+def auth_register(req: AuthReq, request: Request):
     """注册用户：第一个注册者自动成为管理员。密码至少 6 位。
 
     注册成功后自动为其创建一套个人业务域（复制默认 Agent 矩阵），
@@ -700,25 +726,38 @@ def auth_register(req: AuthReq):
     if INVITE_CODE and req.invite_code != INVITE_CODE:
         # 邀请码开启但错配：拒绝注册。错误信息统一为「邀请码错误」，
         # 不区分「未填」与「填错」，避免旁路探测（已知标准实践）。
+        db.audit(req.username, "auth.register", result="denied",
+                 detail={"reason": "invite_code"}, ip=_client_ip(request))
         raise HTTPException(status_code=403, detail="邀请码错误，请联系管理员获取")
     if auth.get_user(req.username):
+        db.audit(req.username, "auth.register", result="denied",
+                 detail={"reason": "exists"}, ip=_client_ip(request))
         raise HTTPException(status_code=409, detail="用户名已存在")
     u = auth.create_user(req.username, req.password)
     # 为新用户建个人域（多租户隔离：owner_id 绑定，仅本人可见）
+    ws_id = None
     try:
-        ws_store.create_personal(u["id"], u["username"])
+        ws = ws_store.create_personal(u["id"], u["username"])
+        ws_id = ws.get("id")
     except Exception as e:  # 建域失败不应阻断注册，仅记录
         metrics.inc("teleops_register_personal_ws_failed")
         print(f"[warn] 为 {u['username']} 建个人域失败: {e}")
+    db.audit(u["username"], "auth.register", workspace_id=ws_id,
+             detail={"ws": ws_id, "is_admin": bool(u["is_admin"])},
+             result="ok", actor_id=u["id"], ip=_client_ip(request))
     token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
     return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
 
 
 @app.post("/auth/login")
-def auth_login(req: AuthReq):
+def auth_login(req: AuthReq, request: Request):
     u = auth.authenticate(req.username, req.password)
     if not u:
+        db.audit(req.username or "unknown", "auth.login", result="denied",
+                 detail={"reason": "bad_credentials"}, ip=_client_ip(request))
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    db.audit(u["username"], "auth.login", result="ok", actor_id=u["id"],
+             ip=_client_ip(request))
     token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
     return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
 
@@ -743,7 +782,11 @@ def auth_logout(request: Request):
     token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
     if not token:
         raise HTTPException(status_code=400, detail="缺少 Authorization 头")
+    user = getattr(request.state, "user", None)
+    actor, actor_id = (user.get("sub"), user.get("uid")) if user else ("anonymous", None)
     revoked = auth.revoke_token(token)
+    db.audit(actor, "auth.logout", result="ok", actor_id=actor_id,
+             ip=_client_ip(request))
     return {"detail": "已注销", "revoked": revoked}
 
 
@@ -1045,12 +1088,16 @@ def stream_start(req: StreamStartReq, request: Request):
         raise HTTPException(status_code=404, detail="业务域不存在")
     user = getattr(request.state, "user", None)
     if req.workspace_id and not ws_store.is_writable_by(req.workspace_id, user):
+        _audit_write(request, "stream.start", req.workspace_id,
+                     {"profile": req.profile, "mode": req.mode}, result="denied")
         raise HTTPException(
             status_code=403,
             detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
     stream = _stream_of(req.workspace_id)
     if stream.running:
         started_by = stream.status().get("started_by") or "其他人"
+        _audit_write(request, "stream.start", req.workspace_id,
+                     {"profile": req.profile, "already_by": started_by}, result="denied")
         raise HTTPException(
             status_code=409,
             detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
@@ -1069,6 +1116,8 @@ def stream_start(req: StreamStartReq, request: Request):
     stream.start(playlist, profile=req.profile,
                  interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
                  started_by=started_by)
+    _audit_write(request, "stream.start", req.workspace_id,
+                 {"profile": req.profile, "mode": mode, "ops_agent_id": ops_id})
     return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
             "mode": mode, "playlist_len": len(playlist),
             "workspace_id": req.workspace_id,
@@ -1087,9 +1136,14 @@ def stream_stop(request: Request, workspace_id: Optional[str] = None):
         raise HTTPException(status_code=404, detail="业务域不存在")
     if workspace_id and not ws_store.is_writable_by(
             workspace_id, getattr(request.state, "user", None)):
+        _audit_write(request, "stream.stop", workspace_id, {}, result="denied")
         raise HTTPException(status_code=403, detail="无权停止该业务域的告警流水线")
     stream = _stream_of(workspace_id)
+    was_running = stream.running
     stream.stop()
+    if was_running:
+        _audit_write(request, "stream.stop", workspace_id,
+                     {"rounds": stream.status().get("rounds", 0)})
     return {"status": "stopped", "detail": stream.status()}
 
 
@@ -1104,6 +1158,7 @@ def stream_reset_demo(request: Request):
     """
     user = getattr(request.state, "user", None)
     if not (user or {}).get("is_admin"):
+        _audit_write(request, "demo.reset", None, {}, result="denied")
         raise HTTPException(status_code=403, detail="重置演示数据仅管理员可用")
     with _streams_lock:
         running = {k: s for k, s in _streams.items() if s.running}
@@ -1113,6 +1168,8 @@ def stream_reset_demo(request: Request):
                "AND (workspace_id IS NULL OR workspace_id='')")
     # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
     db.execute("DELETE FROM requirements")
+    _audit_write(request, "demo.reset", None,
+                 {"stopped_streams": list(running.keys())})
     return {"status": "reset", "stopped_streams": list(running.keys()),
             "tools": [r["name"] for r in db.query(
                 "SELECT name FROM tools ORDER BY name")]}
@@ -1295,7 +1352,7 @@ def agent_diagnose(agent_id: str, req: AlertReq):
 
 
 @app.post("/agents/{agent_id}/build")
-def agent_build(agent_id: str, req: FeedbackReq):
+def agent_build(agent_id: str, req: FeedbackReq, request: Request):
     """研发 Agent 工作台：运行该 Agent 的造工具流程（job 化，状态灯实时联动）。"""
     a = registry.get(agent_id)
     if not a:
@@ -1311,6 +1368,9 @@ def agent_build(agent_id: str, req: FeedbackReq):
             res = inst.fulfill_feedback(fb)
             _reload()
             _save_trace("agent_build", {"agent": agent_id, "feedback": fb, "result": res})
+            _audit_write(request, "tool.build", a.get("workspace_id"),
+                         {"agent": agent_id, "tool": res.get("tool"),
+                          "feedback": req.feedback_id})
             return {"created_tool": res["tool"], "sop": res["sop"],
                     "note": "已自动注册工具并沉淀 SOP，运维 Agent 下一轮即可直接调用"}
         finally:
@@ -1407,6 +1467,8 @@ def create_workspace(req: CreateWorkspaceReq, request: Request):
         ws = ws_store.create(req.name, req.adapter_id, req.mode, req.custom_id, owner_id=owner_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _audit_write(request, "workspace.create", ws["id"],
+                 {"name": req.name, "mode": req.mode, "owner_id": owner_id})
     return ws
 
 
@@ -1425,9 +1487,12 @@ def get_workspace(ws_id: str, request: Request):
 def set_workspace_mode(ws_id: str, req: ModeReq, request: Request):
     user = getattr(request.state, "user", None)
     if not ws_store.is_writable_by(ws_id, user):
+        _audit_write(request, "workspace.mode", ws_id, {"mode": req.mode},
+                     result="denied")
         raise HTTPException(status_code=403, detail="无权修改该业务域")
     if not ws_store.update_mode(ws_id, req.mode):
         raise HTTPException(status_code=400, detail="业务域不存在或 mode 非法")
+    _audit_write(request, "workspace.mode", ws_id, {"mode": req.mode})
     return {"id": ws_id, "mode": req.mode}
 
 
@@ -1435,11 +1500,15 @@ def set_workspace_mode(ws_id: str, req: ModeReq, request: Request):
 def create_agent(ws_id: str, req: CreateAgentReq, request: Request):
     user = getattr(request.state, "user", None)
     if not ws_store.is_writable_by(ws_id, user):
+        _audit_write(request, "agent.create", ws_id, {"name": req.name, "kind": req.kind},
+                     result="denied")
         raise HTTPException(status_code=403, detail="无权在该业务域下创建 Agent")
     try:
         agent = ws_store.add_agent(ws_id, req.kind, req.name, req.scope, req.description, req.primary)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _audit_write(request, "agent.create", ws_id,
+                 {"agent": agent["id"], "name": req.name, "kind": req.kind})
     return agent
 
 
@@ -1447,6 +1516,8 @@ def create_agent(ws_id: str, req: CreateAgentReq, request: Request):
 def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq, request: Request):
     user = getattr(request.state, "user", None)
     if not ws_store.is_writable_by(ws_id, user):
+        _audit_write(request, "agent.update", ws_id, {"agent": agent_id},
+                     result="denied")
         raise HTTPException(status_code=403, detail="无权修改该业务域下的 Agent")
     if req.name:
         if not ws_store.rename_agent(ws_id, agent_id, req.name):
@@ -1454,6 +1525,9 @@ def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq, request: Reques
     if req.scope is not None or req.description is not None:
         if not ws_store.update_agent(ws_id, agent_id, req.scope, req.description):
             raise HTTPException(status_code=404, detail="Agent 不存在")
+    _audit_write(request, "agent.update", ws_id,
+                 {"agent": agent_id, "name": req.name,
+                  "scope": req.scope, "description": req.description})
     return ws_store.get(ws_id)
 
 
@@ -1462,6 +1536,7 @@ def delete_workspace(ws_id: str, request: Request):
     """删除业务域（默认域受保护），并级联清理其下所有 Agent 实例。"""
     user = getattr(request.state, "user", None)
     if not ws_store.is_writable_by(ws_id, user):
+        _audit_write(request, "workspace.delete", ws_id, {}, result="denied")
         raise HTTPException(status_code=403, detail="无权删除该业务域")
     try:
         ok, msg = ws_store.delete_workspace(ws_id)
@@ -1469,6 +1544,7 @@ def delete_workspace(ws_id: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    _audit_write(request, "workspace.delete", ws_id, {"msg": msg})
     return {"deleted": ws_id}
 
 
@@ -1476,11 +1552,61 @@ def delete_workspace(ws_id: str, request: Request):
 def delete_agent(ws_id: str, agent_id: str, request: Request):
     user = getattr(request.state, "user", None)
     if not ws_store.is_writable_by(ws_id, user):
+        _audit_write(request, "agent.delete", ws_id, {"agent": agent_id},
+                     result="denied")
         raise HTTPException(status_code=403, detail="无权删除该业务域下的 Agent")
     ok, msg = ws_store.delete_agent(ws_id, agent_id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
+    _audit_write(request, "agent.delete", ws_id, {"agent": agent_id})
     return {"deleted": agent_id, "workspace": ws_id}
+
+
+@app.get("/audit")
+def list_audit(request: Request, limit: int = 50, offset: int = 0,
+               workspace_id: Optional[str] = None):
+    """操作审计日志（多租户问责）：谁在何时对哪个业务域做了什么。
+
+    隔离规则（与读写隔离同口径）：
+    - 管理员：默认看全量，可按 workspace_id 过滤
+    - 普通用户：只看「自己可见业务域」的操作 + 自己的认证类记录
+      （auth.login / auth.logout / auth.register 等 workspace_id 为空的动作）
+    - 匿名：401
+    - 指定 workspace_id 时先校验可见性，越权/不存在 → 404（不暴露域是否存在）
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="需要登录才能查看审计日志")
+    uid = user.get("uid")
+    is_admin = bool(user.get("is_admin"))
+
+    if workspace_id:
+        if not ws_store.is_visible_to(workspace_id, user):
+            raise HTTPException(status_code=404, detail="业务域不存在")
+        where, params = "WHERE workspace_id=?", [workspace_id]
+    elif is_admin:
+        where, params = "", []
+    else:
+        visible = ws_store.visible_workspace_ids(uid)
+        if not visible:
+            where, params = "WHERE 1=0", []
+        else:
+            ph = ",".join("?" * len(visible))
+            # 域内操作 + 本人认证类记录（workspace_id 为空的登录/登出/注册）
+            where = (f"WHERE (workspace_id IN ({ph}) "
+                     "OR (workspace_id IS NULL AND actor_id=?))")
+            params = list(visible) + [uid]
+
+    safe_limit = max(1, min(int(limit), 500))
+    safe_offset = max(0, int(offset))
+    rows = db.query(
+        f"SELECT * FROM audit_log {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        tuple(params) + (safe_limit, safe_offset))
+    total = db.query_one(f"SELECT COUNT(*) AS c FROM audit_log {where}",
+                         tuple(params))["c"]
+    return {"items": [dict(r) for r in rows], "total": total,
+            "limit": safe_limit, "offset": safe_offset,
+            "scope": "all" if is_admin else "own"}
 
 
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------

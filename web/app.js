@@ -68,6 +68,7 @@ $$(".nav-item").forEach((btn) => {
     if (v === "integ") renderIntegrations();
     if (v === "overview") loadOverview();
     if (v === "stream") streamEnter();
+    if (v === "audit") renderAudit();
   });
 });
 
@@ -683,6 +684,85 @@ $("#modeManual").onclick = () => setMode("manual");
 $("#boardRefresh").onclick = () => renderBoard();
 $("#raiseBtn").onclick = () => raiseRequirement();
 
+// ---------- 操作审计（多租户问责） ----------
+const AUDIT_LABEL = {
+  "auth.register": "注册账号", "auth.login": "登录", "auth.logout": "登出",
+  "workspace.create": "创建业务域", "workspace.delete": "删除业务域",
+  "workspace.mode": "切换派发模式",
+  "agent.create": "创建 Agent", "agent.update": "编辑 Agent",
+  "agent.delete": "删除 Agent",
+  "stream.start": "启动告警流", "stream.stop": "停止告警流",
+  "demo.reset": "重置演示数据", "tool.build": "研发造工具",
+};
+
+function auditWsName(wsId) {
+  if (!wsId) return "—";
+  const w = (WS_LIST || []).find((x) => x.id === wsId);
+  return w ? w.name : wsId;
+}
+
+function syncAuditWsOptions() {
+  const sel = $("#auditWs");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部可见域</option>' +
+    (WS_LIST || []).map(
+      (w) => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+  if (cur) sel.value = cur;   // 保留用户已选（域列表刷新后不丢失选择）
+}
+
+async function renderAudit() {
+  const body = $("#auditBody"), empty = $("#auditEmpty"), scope = $("#auditScope");
+  if (!body) return;
+  if (!USER) {
+    body.innerHTML = "";
+    if (empty) { empty.style.display = ""; empty.textContent = "请先登录后再查看审计日志"; }
+    if (scope) scope.textContent = "";
+    return;
+  }
+  syncAuditWsOptions();
+  const wsId = ($("#auditWs") || {}).value || "";
+  const limit = ($("#auditLimit") || {}).value || "50";
+  const qs = `?limit=${encodeURIComponent(limit)}` +
+             (wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : "");
+  try {
+    const r = await apiFetch(`/audit${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    const items = d.items || [];
+    body.innerHTML = items.map((it) => {
+      const label = AUDIT_LABEL[it.action] || "";
+      return `<tr>
+        <td>${escapeHtml(String(it.ts || "").replace("T", " "))}</td>
+        <td>${escapeHtml(it.actor || "—")}</td>
+        <td><span class="audit-action">${escapeHtml(it.action || "")}</span>${
+          label ? `<div class="audit-sub">${escapeHtml(label)}</div>` : ""}</td>
+        <td>${escapeHtml(auditWsName(it.workspace_id))}</td>
+        <td class="audit-detail">${escapeHtml(it.detail || "")}</td>
+        <td><span class="audit-result ${escapeHtml(it.result || "ok")}">${
+          escapeHtml(it.result || "ok")}</span></td>
+        <td>${escapeHtml(it.ip || "—")}</td>
+      </tr>`;
+    }).join("");
+    if (empty) {
+      empty.style.display = items.length ? "none" : "";
+      if (!items.length) empty.textContent = "暂无审计记录";
+    }
+    if (scope) {
+      scope.textContent = `共 ${d.total ?? items.length} 条 · 范围：${
+        d.scope === "all" ? "全量（管理员）" : "仅本人可见域"}`;
+    }
+  } catch (e) {
+    body.innerHTML = "";
+    if (empty) { empty.style.display = ""; empty.textContent = "审计日志加载失败：" + e.message; }
+    if (scope) scope.textContent = "";
+  }
+}
+
+$("#auditRefresh").onclick = () => renderAudit();
+$("#auditWs").onchange = () => renderAudit();
+$("#auditLimit").onchange = () => renderAudit();
+
 // ---------- 接入层 / 适配器 ----------
 const ADP_ICON = { alert: "🚨", log: "📜", cmdb: "🗺️", ticket: "🎫", exec: "⚙️", knowledge: "📚" };
 
@@ -910,6 +990,7 @@ async function refreshCurrentView() {
         break;
       case "view-board": await renderBoard(); break;
       case "view-tools": await renderTools(); break;
+      case "view-audit": await renderAudit(); break;
       // view-topo（有拖拽布局）/ view-integ（适配器静态配置）不自动刷，避免打断；
       // view-stream / view-loop 有自己的 streamPoll(1.2s)，不重复刷。
     }

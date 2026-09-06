@@ -77,6 +77,17 @@ CREATE TABLE IF NOT EXISTS messages (
   detail TEXT,
   ts TEXT
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  actor_id INTEGER,
+  action TEXT NOT NULL,
+  workspace_id TEXT,
+  detail TEXT,
+  result TEXT DEFAULT 'ok',
+  ip TEXT
+);
 """
 
 _conn = None
@@ -205,3 +216,50 @@ def query_one(sql: str, params=()):
     with _LOCK:
         row = get_conn().execute(sql, params).fetchone()
     return row
+
+
+# ---------------- 操作审计（多租户问责） ----------------
+def audit(actor, action, workspace_id=None, detail=None, result="ok",
+          actor_id=None, ip=None):
+    """写入一条操作审计记录。任何异常都静默吞掉，绝不阻断主流程。
+
+    actor：操作人（用户名 / 'anonymous' / 'system'）
+    action：动作标识（如 auth.login / workspace.create / agent.delete / stream.start /
+            tool.build 等）
+    workspace_id：受影响的业务域（可空，如登录类动作）
+    detail：人类可读摘要，或结构化 dict（自动 JSON 化）
+    result：'ok' / 'denied' / 'error'
+    actor_id / ip：可选，便于回溯具体账号与来源
+    """
+    try:
+        if detail is not None and not isinstance(detail, str):
+            detail = json.dumps(detail, ensure_ascii=False)
+        with _LOCK:
+            conn = get_conn()
+            conn.execute(
+                "INSERT INTO audit_log "
+                "(ts,actor,actor_id,action,workspace_id,detail,result,ip) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (_now(), str(actor), actor_id, action, workspace_id, detail,
+                 result, ip))
+            conn.commit()
+    except Exception as e:  # 审计失败绝不影响主业务
+        print(f"[warn] audit log write failed: {e}")
+
+
+def audit_rows(limit=50, offset=0, workspace_id=None, actor_id=None):
+    """按条件倒序读取审计记录（最新在前）。供 GET /audit 使用。"""
+    clauses, params = [], []
+    if workspace_id is not None:
+        clauses.append("workspace_id=?")
+        params.append(workspace_id)
+    if actor_id is not None:
+        clauses.append("actor_id=?")
+        params.append(actor_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = query(
+        f"SELECT * FROM audit_log {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        tuple(params) + (limit, offset))
+    total = query_one(
+        f"SELECT COUNT(*) AS c FROM audit_log {where}", tuple(params))["c"]
+    return rows, total
