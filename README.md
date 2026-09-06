@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/chenli2919539686/TeleOps/actions/workflows/ci.yml/badge.svg)](https://github.com/chenli2919539686/TeleOps/actions)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
+[![Tests](https://img.shields.io/badge/tests-134%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > **仓库**：https://github.com/chenli2919539686/TeleOps
@@ -93,7 +93,7 @@ TeleOps/
 │   ├── verify_project.py     # 项目级验证（14 项）
 │   ├── capture_shots.js      # 自动截图：后端启动后用 Edge 捕获前端 7 视图 + 工作台
 │   └── _shoot_stream.js      # 自动截图：实时告警流面板
-├── tests/                    # pytest 套件（61 项；临时库 + 离线 Mock，不污染运行数据）
+├── tests/                    # pytest 套件（134 项；临时库 + 离线 Mock，不污染运行数据）
 │   ├── conftest.py           # 临时 DB + mock LLM + TestClient fixture
 │   ├── test_auth.py / test_workspaces.py / test_closed_loop.py
 │   ├── test_w3_endpoints.py  # 原 test_api.py 的 pytest 化版本
@@ -148,7 +148,7 @@ cp .env.example .env
 #    填好 Key 后重跑 demo_w2.py 即走 DeepSeek 真实推理（无 Key 自动 Mock 兜底）
 
 # 8. 跑测试套件（pytest，无需启动服务器；自动使用临时数据库 + 离线 Mock，不污染运行数据）
-python -m pytest          # 61 项：只读端点 / JWT 鉴权 / 业务域隔离 / 闭环编排 / 工具复用 / Mock 确定性 / 告警降噪分层 / W3 经典端点 / Prometheus 指标 / 限流
+python -m pytest          # 134 项：只读端点 / JWT 鉴权 / 业务域隔离 / 闭环编排 / 工具复用 / Mock 确定性 / 告警降噪分层 / W3 经典端点 / Prometheus 指标 / 限流 / 多租户审计 / 进程管理
 
 # 9. W3/主界面：启动真实 HTTP 服务 —— FastAPI 同源托管 web/ 前端（9 视图）
 python -m uvicorn src.api.server:app --reload --port 8000
@@ -217,6 +217,18 @@ python app.py
 - 设计文档 `接入层设计.md` 新增「3.1 配置真实连接（配置驱动 + demo 兜底）」与两张适配器的状态更新。
 - 新增 `tests/test_adapters_real.py` 11 项（webhook 解析 / demo fixture / 真实 API 映射 / severity 归一化 / 注册表状态）；**全量 pytest 88 项全绿**。
 
+**v0.8.8 → v0.8.22 · 安全加固 + 多租户 + 工程化落地**
+- **v0.8.9+ · 多租户三层隔离**：业务域读写分离校验——「能看见 ≠ 能改动」。新增 `is_visible_to()`（读，越权返回 404 不暴露是否存在）+ `is_writable_by()`（写，越权返回 403）；读过滤与写过滤同步落地，杜绝早期「多用户共用一套 Agent」的越权漏洞。匿名用户仅可见公共域 `core-net`。
+- **v0.8.10 · 注册邀请码**：`TELEOPS_INVITE_CODE` 环境变量；非空时 `/auth/register` 必填且错误统一 403，防止被脚本批量注册探测。`/auth/status` 暴露 `invite_required`。
+- **v0.8.11 · 防火墙白名单**：`teleops_ctl.py firewall {on,off,status}`，默认放行 RFC1918 私网段，支持 `TELEOPS_FIREWALL_ALLOWED` 自定义；仅管理员权限生效。
+- **v0.8.12 · 零依赖限流**：弃用 slowapi，自研进程内滑动窗口（读 120 / 写 60 / 登录 5 次每分每 IP），429 + `Retry-After`，`/health` `/metrics` / 静态资源不计额度；阈值经 `TELEOPS_RATE_LIMIT_*` 调节。
+- **v0.8.13 · Caddy HTTPS 反代**：`scripts/Caddyfile`（443 + tls internal 自签 + reverse_proxy 127.0.0.1:8000）；`caddy_runner.py` 自动下载/三路径回退；`teleops_ctl.py caddy {on,off,status}` 一键开关。
+- **v0.8.18 · 告警流多租户隔离**：`AlertStream` 从全局单例改为 `_streams[ws_id]` 字典，每个业务域独立流水线 + `started_by` 记录；启停接口带 `is_writable_by()` 校验，管理员不会误跑别人的流、也不会停不下来。
+- **v0.8.20 · 停止计时清零**：`AlertStream.stop()` 清空 `_started_at`，修复「停了但计时还在跑」的展示 bug。
+- **v0.8.21 · 多租户操作审计日志**：新增 `audit_log` 表 + 14 个埋点（注册/登录/登出/建域/删域/切模式/增删改 Agent/启停流/重置演示/造工具）+ `GET /audit`（admin 看全部 / 普通看自己 / 匿名 401 / 不可见域 404）；**越权被拒（403）同样留痕**，这是审计最大价值。前端「🧾 操作审计」视图 5s 自动刷新。
+- **v0.8.22 · 进程管理健壮化**：根治 Windows「PID 存活 ≠ 服务健康」——`python -m uvicorn` 派生子进程，停止须 `taskkill /F /T` 杀整棵进程树；启动后回写真实监听者 PID（而非启动器存根）；`caddy_runner.py` 以 443 端口监听为准，PID 文件丢失时 netstat 反查自愈；`caddy_stop` 端口兜底且仅杀确认是 caddy 的进程，防误杀其它服务。测试改用 `tmp_path` 隔离，**不再删除生产 PID 文件**。**全量 pytest 134 项全绿**。
+- 详见 `docs/03-核心难点与踩坑记录.md`（多租户隔离 / 进程管理 / 审计旁路 / Caddy PID 自愈 / LangGraph 版本锁 / 测试隔离等真实难点与解法）。
+
 **v0.8.6 · 自定义单价：任意模型精确计价**
 - **问题**：v0.8.5 的费用估算依赖内置定价表（9 个常见模型），切到表外模型（如其他厂商新模型）时只能按保守默认价粗估——token 数与预算护栏依然准确，但「今日估算费用」会有偏差。
 - **自定义单价**：`data/llm_config.json` 新增 `pricing` 字段，按 `{"provider.model": [输入, 缓存命中, 输出]}` 覆盖内置表（¥/百万 token）；也支持裸模型名 key（对任意 provider 的同名模型生效）与二元组 `[输入, 输出]` 简写。非法配置（字符串 / 负数 / 长度不对）一律跳过回退，绝不中断计费。
@@ -276,6 +288,15 @@ python app.py
 - **用户 = JWT 身份**：首注册用户自动 admin，写接口强制鉴权（每用户 JWT 优先，共享 Token 回退）。
 
 本轮**不做组织级硬隔离**（新增 tenant 表、全链路 tenant 上下文、按租户分密钥）：单服务部署下收益与成本不成比例，且需大改数据模型/API/前端/测试。演进路径（出现多副本或多客户独立运营需求时）：加 `tenant_id` 外键 → 中间件注入 tenant 上下文 + 全部查询强制过滤 → 回归测试 → 前端登录选租户；多副本共享限流计数时把进程内窗口换 Redis。
+
+## 文档导航
+
+- `docs/01-技术选型与架构.md`：技术栈全景、五层架构、模块职责、可替换性设计。
+- `docs/02-搭建与部署流程.md`：本地开发 → Windows 本机 HTTPS → Docker 自托管上公网的四条路线 + 公网安全检查清单。
+- `docs/03-核心难点与踩坑记录.md`：多租户隔离、进程管理、审计旁路、Caddy PID 自愈等真实难点与解法。
+- `docs/安全加固使用指南.md`：邀请码 / 防火墙 / 限流 / Caddy HTTPS / 审计日志的使用说明。
+- `TeleOps_项目梳理.md`：功能盘点（v0.7 级基线）。
+- `接入层设计.md`：外部运维系统接入内核的设计。
 
 ## 部署到 Hugging Face Spaces
 
