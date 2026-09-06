@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Caddyfile 与 caddy_runner 单元测试（v0.8.13）。
+"""Caddyfile 与 caddy_runner 单元测试（v0.8.13 / v0.8.22 隔离加固）。
 
 覆盖：
 1. Caddyfile 存在且语法骨架合法（443 listener + reverse_proxy 127.0.0.1:8000）
 2. caddy_runner._resolve_caddy_exe 能在 PATH/常见路径找到 caddy（如已装）
 3. ensure_caddy_binary 返回正确布尔值
-4. _port_listening / _read_pid 健壮性
+4. _port_listening / _read_pid / find_pid_by_port / _pid_is_caddy 健壮性
+
+隔离约定：所有会读写 PID 文件的用例必须 monkeypatch 到 tmp_path，
+绝不允许触碰生产 data/.caddy.pid（测试曾直接删生产文件导致 caddy
+status 误报未运行）。
 """
 import sys
 from pathlib import Path
@@ -67,22 +71,57 @@ def test_port_listening_safe_with_invalid_port():
     assert isinstance(result, bool)
 
 
-def test_pid_handling_when_no_pid_file():
-    """无 PID 文件时 _read_pid 返回 None。"""
+def test_pid_handling_when_no_pid_file(tmp_path, monkeypatch):
+    """无 PID 文件 / 内容非法时 _read_pid 返回 None。
+
+    用 tmp_path 隔离：绝不触碰生产 data/.caddy.pid。
+    （此前直接 unlink 生产 PID 文件，导致运行中的 Caddy 被 status 误报
+    「未运行」——测试污染生产状态的真实缺陷。）
+    """
     from scripts import caddy_runner
-    # 确保 pid 文件不存在（测试期间）
-    if caddy_runner.PID_FILE.exists():
-        caddy_runner.PID_FILE.unlink()
+    monkeypatch.setattr(caddy_runner, "PID_FILE", tmp_path / ".caddy.pid")
+
+    # 不存在 → None
     assert caddy_runner._read_pid() is None
+    # 内容非法 → None（不抛异常）
+    (tmp_path / ".caddy.pid").write_text("not-a-number", encoding="utf-8")
+    assert caddy_runner._read_pid() is None
+    # 空文件 → None
+    (tmp_path / ".caddy.pid").write_text("", encoding="utf-8")
+    assert caddy_runner._read_pid() is None
+    # 正常数字 → int
+    (tmp_path / ".caddy.pid").write_text("12345", encoding="utf-8")
+    assert caddy_runner._read_pid() == 12345
 
 
-def test_caddy_status_returns_tuple():
-    """caddy_status 返回 (bool, dict) 元组。"""
+def test_find_pid_by_port_returns_int_or_none():
+    """find_pid_by_port 对任意端口不抛异常，返回 int 或 None。"""
     from scripts import caddy_runner
+    # 1 号端口大概率无人监听
+    result = caddy_runner.find_pid_by_port(1)
+    assert result is None or isinstance(result, int)
+
+
+def test_pid_is_caddy_safe_with_bogus_pid():
+    """_pid_is_caddy 对不存在的 PID 返回 False，不抛异常（防误杀守门员）。"""
+    from scripts import caddy_runner
+    # 4194303 是 Windows 用户态 PID 上限附近，几乎不可能存在
+    assert caddy_runner._pid_is_caddy(4194303) is False
+    assert caddy_runner._pid_is_caddy(None) is False
+    assert caddy_runner._pid_is_caddy(0) is False
+
+
+def test_caddy_status_returns_tuple(tmp_path, monkeypatch):
+    """caddy_status 返回 (bool, dict) 元组。
+
+    monkeypatch PID_FILE 到 tmp_path：status 的自愈逻辑会回写 PID 文件，
+    必须隔离，避免测试期间改动生产状态。
+    """
+    from scripts import caddy_runner
+    monkeypatch.setattr(caddy_runner, "PID_FILE", tmp_path / ".caddy.pid")
     running, info = caddy_runner.caddy_status()
     assert isinstance(running, bool)
     assert isinstance(info, dict)
-    assert "pid" in info
-    assert "port_443" in info
-    assert "http" in info
+    for key in ("pid", "port_443", "http", "port_pid", "pid_file_stale", "pid_file_healed"):
+        assert key in info, f"info 缺少字段 {key}"
     assert info["http"] == "127.0.0.1:8000"

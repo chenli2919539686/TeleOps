@@ -139,14 +139,22 @@ def find_pid_by_port(port: int) -> int | None:
 
 def cmd_start(quiet: bool = False) -> None:
     pid = read_pid()
-    if pid and is_pid_alive(pid):
+    port_pid = find_pid_by_port(PORT)
+
+    # 只有在「PID 文件记录的进程确实占着端口」时才认定已在运行。
+    # 不能只看 PID 存活就判定：PID 会被系统复用给无关进程，或残留一个不再监听的
+    # 存根进程，此时脚本会误报「已在运行」并拒绝启动，而端口其实是空的、服务是死的。
+    if pid and is_pid_alive(pid) and port_pid == pid:
         _ok(f"已在运行 PID={pid}（端口 {PORT}）")
         _print_url()
         return
 
-    # 端口兜底：PID 文件丢了但端口还被人占着，先杀掉
-    port_pid = find_pid_by_port(PORT)
-    if port_pid and (pid is None or port_pid != pid):
+    if pid and is_pid_alive(pid) and port_pid is None:
+        _warn(f"PID 文件指向 PID={pid}，但它并未监听端口 {PORT}"
+              f"（PID 复用或残留进程），忽略该记录")
+
+    # 端口兜底：端口被别的进程占着，先杀掉
+    if port_pid and port_pid != pid:
         _warn(f"端口 {PORT} 被 PID={port_pid} 占用（非本服务进程），先 kill")
         _kill_pid(port_pid)
         time.sleep(1)
@@ -191,8 +199,16 @@ def cmd_start(quiet: bool = False) -> None:
             return
         try:
             with socket.create_connection(("127.0.0.1", PORT), timeout=1):
+                # 端口就绪后回写「真正监听的 PID」。
+                # Popen 拿到的是启动器存根（python -m uvicorn 会派生子进程，
+                # 端口由子进程持有），直接记它会导致 stop 杀错目标、status 误报。
+                real_pid = find_pid_by_port(PORT) or proc.pid
+                try:
+                    PID_FILE.write_text(str(real_pid), encoding="utf-8")
+                except OSError:
+                    pass
                 if not quiet:
-                    _ok(f"端口 {PORT} 已就绪（耗时 {(i + 1) * 0.5:.1f}s）")
+                    _ok(f"端口 {PORT} 已就绪（耗时 {(i + 1) * 0.5:.1f}s，PID={real_pid}）")
                 _print_url()
                 return
         except OSError:
@@ -202,7 +218,11 @@ def cmd_start(quiet: bool = False) -> None:
 
 def _kill_pid(pid: int) -> bool:
     try:
-        subprocess.check_call(["taskkill", "/F", "/PID", str(pid)])
+        # /T = 连同子进程树一起杀。
+        # 必须带 /T：本服务是 `python -m uvicorn`，启动器会派生子进程，
+        # 真正占端口的是子进程；只杀父进程会留下孤儿继续占端口，
+        # 下次 start 才发现「端口被占」——表现为 stop 后服务还活着。
+        subprocess.check_call(["taskkill", "/F", "/T", "/PID", str(pid)])
         return True
     except subprocess.CalledProcessError:
         return False
@@ -210,22 +230,36 @@ def _kill_pid(pid: int) -> bool:
 
 def cmd_stop() -> None:
     pid = read_pid()
-    if not pid or not is_pid_alive(pid):
-        # 兜底按端口找
-        port_pid = find_pid_by_port(PORT)
-        if port_pid:
+    port_pid = find_pid_by_port(PORT)
+
+    # 两个来源都要收，避免只杀掉其中一个：
+    # pid（启动器，可能已退出）与 port_pid（实际监听进程）常常不是同一个。
+    targets = []
+    if pid and is_pid_alive(pid):
+        targets.append(pid)
+    if port_pid and port_pid not in targets:
+        if len(targets) == 0:
             _warn(f"PID 文件失效，按端口找到 PID={port_pid}，尝试停止")
-            pid = port_pid
+        targets.append(port_pid)
+
+    if not targets:
+        _info("未在运行")
+        if PID_FILE.exists():
+            PID_FILE.unlink(missing_ok=True)
+        return
+
+    ok = True
+    for t in targets:
+        # 前一个目标的 /T 可能已经把后者一并杀掉了，跳过已终止的避免误报失败
+        if not is_pid_alive(t):
+            continue
+        if _kill_pid(t):
+            _ok(f"已停止 PID={t}（含子进程）")
         else:
-            _info("未在运行")
-            if PID_FILE.exists():
-                PID_FILE.unlink(missing_ok=True)
-            return
-    if _kill_pid(pid):
-        _ok(f"已停止 PID={pid}")
-    else:
-        _err(f"停止 PID={pid} 失败")
-    PID_FILE.unlink(missing_ok=True)
+            ok = False
+            _err(f"停止 PID={t} 失败")
+    if ok:
+        PID_FILE.unlink(missing_ok=True)
 
 
 def cmd_restart() -> None:
@@ -245,6 +279,9 @@ def cmd_status() -> None:
     print(f" 端口 {PORT} 占用 PID: {port_pid or '-'}    监听中: {port_alive}")
     print(f" 绑定地址: {HOST}:{PORT}")
     print(f" 日志文件: {LOG_FILE}（{'存在' if LOG_FILE.exists() else '尚未生成'}）")
+    if alive and port_pid is not None and port_pid != pid:
+        _warn(f"PID 文件({pid}) 与实际监听进程({port_pid}) 不一致："
+              f"该文件已失效，stop/start 会自动按端口纠正")
     print("=" * 50)
 
     if port_alive:

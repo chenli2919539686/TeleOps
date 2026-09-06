@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Caddy HTTPS 反代启停管理（v0.8.13）。
+"""Caddy HTTPS 反代启停管理（v0.8.13 / v0.8.22 状态自愈加固）。
 
 依赖：
 - tools/caddy.exe（Caddy Windows 二进制，由 caddy_setup.py 部署）
@@ -9,8 +9,9 @@
 用法（一般通过 teleops_ctl.py caddy 调用）：
     ensure_caddy_binary()  → bool       是否就绪（不存在时返回 False 并打印提示）
     caddy_start()          → (ok, msg)  启动后台进程
-    caddy_status()         → (running, info_dict)
-    caddy_stop()           → bool
+    caddy_status()         → (running, info_dict)  端口为准，PID 文件丢失时自愈
+    caddy_stop()           → bool       PID 文件 + 端口反查双保险
+    find_pid_by_port(port) → int|None   netstat 反查监听进程
 """
 import ctypes
 import os
@@ -138,16 +139,81 @@ def _port_listening(port):
         return False
 
 
+def find_pid_by_port(port):
+    """netstat -ano 反查监听端口的 PID。找不到返回 None。"""
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "TCP"],
+            text=True,
+            encoding="gbk",
+            errors="ignore",
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    needle = f":{port}"
+    for line in out.splitlines():
+        if needle in line and "LISTENING" in line:
+            parts = line.split()
+            try:
+                return int(parts[-1])
+            except (ValueError, IndexError):
+                continue
+    return None
+
+
+def _pid_is_caddy(pid):
+    """tasklist 判断 PID 是否是 caddy.exe（用于防误杀其它 443 服务）。"""
+    if not pid or pid <= 0:
+        return False
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            text=True,
+            encoding="gbk",
+            errors="ignore",
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+    # 无匹配时 tasklist 输出 "INFO: No tasks are running..."，不含 caddy
+    return "caddy" in out.lower()
+
+
 def caddy_status():
-    """返回 (running: bool, info: dict)。"""
+    """返回 (running: bool, info: dict)。
+
+    判断口径：以「443 端口在监听」为准，PID 文件只是辅助。
+    PID 文件可能丢失（被清理/误删，如测试误删）或与端口实际持有者不一致，
+    若只信 PID 文件会误报「未运行」，进而导致 caddy off 停不掉进程。
+
+    自愈：端口在监听且持有者是 caddy 时，把反查到的真实 PID 回写 PID 文件，
+    这样后续 caddy off / status 都恢复正常，无需人工干预。
+    """
     pid = _read_pid()
     alive = _is_pid_alive(pid) if pid else False
     port_up = _port_listening(LISTEN_HTTPS_PORT)
-    running = alive and port_up
+    port_pid = find_pid_by_port(LISTEN_HTTPS_PORT) if port_up else None
+
+    healed = False
+    # PID 记录缺失/过期，但 443 由 caddy 持有 → 回写真实 PID 自愈
+    if port_pid and port_pid != pid and _pid_is_caddy(port_pid):
+        try:
+            PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            PID_FILE.write_text(str(port_pid), encoding="utf-8")
+            healed = True
+        except OSError:
+            pass
+        pid = port_pid
+        alive = True
+
+    running = port_up or alive
     info = {
         "pid": pid,
         "alive": alive,
         "port_443": port_up,
+        "port_pid": port_pid,
+        # 端口在监听但 PID 记录不可用（未自愈成功，如持有者非 caddy）
+        "pid_file_stale": bool(port_up and not healed and not alive),
+        "pid_file_healed": healed,
         "exe": str(_resolve_caddy_exe() or CADDY_EXE),
         "http": BACKEND_HTTP,
     }
@@ -159,9 +225,9 @@ def caddy_start():
     if not ensure_caddy_binary():
         return False, "caddy.exe 未就绪"
 
-    # 已经在跑就跳过
+    # 已经在跑就跳过（端口在监听，或 PID 活着且确实是 caddy 进程）
     running, info = caddy_status()
-    if running:
+    if running and (info["port_443"] or _pid_is_caddy(info["pid"])):
         return True, f"已在运行（PID={info['pid']}）"
 
     # 但端口被占用（且不是我们），报错
@@ -205,18 +271,35 @@ def caddy_start():
 
 
 def caddy_stop():
-    """停止后台 Caddy。"""
+    """停止后台 Caddy。
+
+    双保险：PID 文件 + 端口反查。PID 文件丢失时（被清理/误删），
+    通过 netstat 找到 443 的实际持有者杀掉；仅当确认是 caddy 进程才杀，
+    防止误杀占用 443 的其它服务（如其它 HTTPS 反代）。
+    """
     pid = _read_pid()
-    if not pid:
-        return False
-    if not _is_pid_alive(pid):
+    targets = []
+    if pid and _is_pid_alive(pid):
+        targets.append(pid)
+    port_pid = find_pid_by_port(LISTEN_HTTPS_PORT)
+    if port_pid and port_pid not in targets and _pid_is_caddy(port_pid):
+        targets.append(port_pid)
+
+    if not targets:
         PID_FILE.unlink(missing_ok=True)
         return False
-    try:
-        subprocess.check_call(["taskkill", "/F", "/PID", str(pid)])
-    except subprocess.CalledProcessError:
-        pass
+
+    killed = False
+    for t in targets:
+        # 前一次 taskkill 可能已把后续目标一并终止，跳过已死的避免误报
+        if not _is_pid_alive(t):
+            continue
+        try:
+            subprocess.check_call(["taskkill", "/F", "/T", "/PID", str(t)])
+            killed = True
+        except subprocess.CalledProcessError:
+            pass
     PID_FILE.unlink(missing_ok=True)
-    # 给端口一点释放时间
     time.sleep(0.5)
-    return True
+    # 以「端口已释放」为最终成功标准：哪怕一个都没杀成，端口空了就算停了
+    return killed or not _port_listening(LISTEN_HTTPS_PORT)
