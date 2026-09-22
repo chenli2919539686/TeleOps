@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/chenli2919539686/TeleOps/actions/workflows/ci.yml/badge.svg)](https://github.com/chenli2919539686/TeleOps/actions)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-134%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
+[![Tests](https://img.shields.io/badge/tests-138%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > **仓库**：https://github.com/chenli2919539686/TeleOps
@@ -229,6 +229,22 @@ python app.py
 - **v0.8.22 · 进程管理健壮化**：根治 Windows「PID 存活 ≠ 服务健康」——`python -m uvicorn` 派生子进程，停止须 `taskkill /F /T` 杀整棵进程树；启动后回写真实监听者 PID（而非启动器存根）；`caddy_runner.py` 以 443 端口监听为准，PID 文件丢失时 netstat 反查自愈；`caddy_stop` 端口兜底且仅杀确认是 caddy 的进程，防误杀其它服务。测试改用 `tmp_path` 隔离，**不再删除生产 PID 文件**。**全量 pytest 134 项全绿**。
 - 详见 `docs/03-核心难点与踩坑记录.md`（多租户隔离 / 进程管理 / 审计旁路 / Caddy PID 自愈 / LangGraph 版本锁 / 测试隔离等真实难点与解法）。
 
+**v0.8.23 · 企业级能力增强（对标 GitHub 同类求职项目补差）**
+- **仿真靶机闭环验证**：新增 `src/sim/target_env.py`（数字孪生目标环境，按动作改状态、回 True/False 表示「恢复」）+ `scripts/eval_closed_loop.py`，跑标注故障集输出 **MTTR / 根因 Top-1 准确率 / 噪声抑制率 / 修复成功率**。`data/eval_results.json` 落盘。**关键**：诊断段用真实标注离线验证，修复段用仿真靶机验证并在结果中标 `remediation=simulated`——诚实不冒充生产验证，符合 shadow-mode 标准做法。实测：根因 Top-1 87.5% / 抑制率 100% / 修复成功率(仿真) 87.5%。
+- **真实电信数据接入**：`real_adapters.py` 新增 `FiveGKpiAdapter`（`alert-5g`），把 5G 小区 KPI（RRC 建立成功率 / PRB 利用率 / 丢包率等）超阈转成统一告警，复用既有 `adapters/` 架构进 `alert_stream`，可从前端「推送 5G 样例告警」。配置驱动 + 未配置回退 demo。
+- **人工审批 HITL**：新增 `src/core/approvals.py` + `GET/POST /approvals{，/approve，/reject}`；`TELEOPS_REQUIRE_APPROVAL=1` 时造工具先落待批单、管理员批准才执行；前端「✅ 审批队列」。
+- **MCP 接 Grafana/Prometheus**：`real_adapters.py` 新增 `GrafanaAdapter`（`metrics-grafana`），`query_metrics` 接真实 Prometheus HTTP API，未配回退仿真时序；`POST /adapters/metrics-grafana/query`。
+- **OIDC SSO**：`/auth/oidc/login` + `/auth/oidc/callback`（含 dev mock 可直接演示，真实 IdP 留 JWKS 钩子），与现有 JWT/邀请码并存；前端「🔑 SSO」。
+- **指标看板 + 审计回放**：`GET /metrics/summary` 返回量化指标 + 实时 Adapter 统计，前端「📊 指标看板」卡片；`/audit` 加 `since/until` 时间范围 + 前端「▶ 回放」按时间轴逐步高亮。
+- 新增 `docs/04-能力对照与优化路线.md`（功能设计 + GitHub 8 项目对比表 + P0/P1/P2 优化路线）。**全量 pytest 138 项全绿**（新增 4 项路由测试在外）。
+
+**v0.8.24 · 调度架构：告警选对应 Agent + 并发隔离（不卡顿）**
+- **问题**：原 `_stream_make_processor` 把一条流里所有告警都喂同一个 `primary_ops` Agent 且同步调 LLM，多业务域并发抢同一 DeepSeek 配额 → 互相限流变慢（用户直观感受「多 Agent 却卡」）。
+- **A 路由匹配**：告警流改用 `registry.route("ops", {tags: alert.tags+metric+source, description: message}, cross_domain=True)` 按特征选最专长 Agent；`route` 优先级「同域 scope 交集 → 全局兜底（仅告警处置跨域）→ 同域轮询兜底」。核心-net 补种为 2 个运维 Agent（主运维 scope=[core,compute] / 接入网运维 scope=[access,optical,onu]），ONU 告警自动分接入网 Agent、过热分核心网 Agent。
+- **B 并发隔离**：新增全局 `LLM_SEM = Semaphore(TELEOPS_LLM_CONCURRENCY=4)` + 每 Agent `Semaphore(TELEOPS_AGENT_CONCURRENCY=2)`，包住 `handle_alert`；多域/多流并发最多 4 条同时调 LLM（不踩配额），单 Agent 过载排队而非阻塞进程。**逻辑层改造，进程/端口零增加**——未采纳「拆多个物理 API」方案（与已有按域多实例 `_streams[ws_id]` 重复、Caddy 路由爆炸）。
+- **回归修复**：`route` 全局兜底初版误伤研发需求派发（dev 造工具串域），加 `cross_domain` 开关收敛到「仅告警处置跨域」，dev 派发保持同域隔离（旧测试 `test_raise_requirement_routed_in_domain` 抓到）。
+- 新增 `tests/test_agent_routing.py` 4 项（按 scope 分流 / 跨域兜底 / 轮询兜底 / dev 不跨域）。**全量 pytest 138 项全绿**。
+
 **v0.8.6 · 自定义单价：任意模型精确计价**
 - **问题**：v0.8.5 的费用估算依赖内置定价表（9 个常见模型），切到表外模型（如其他厂商新模型）时只能按保守默认价粗估——token 数与预算护栏依然准确，但「今日估算费用」会有偏差。
 - **自定义单价**：`data/llm_config.json` 新增 `pricing` 字段，按 `{"provider.model": [输入, 缓存命中, 输出]}` 覆盖内置表（¥/百万 token）；也支持裸模型名 key（对任意 provider 的同名模型生效）与二元组 `[输入, 输出]` 简写。非法配置（字符串 / 负数 / 长度不对）一律跳过回退，绝不中断计费。
@@ -294,6 +310,7 @@ python app.py
 - `docs/01-技术选型与架构.md`：技术栈全景、五层架构、模块职责、可替换性设计。
 - `docs/02-搭建与部署流程.md`：本地开发 → Windows 本机 HTTPS → Docker 自托管上公网的四条路线 + 公网安全检查清单。
 - `docs/03-核心难点与踩坑记录.md`：多租户隔离、进程管理、审计旁路、Caddy PID 自愈等真实难点与解法。
+- `docs/04-能力对照与优化路线.md`：功能设计与 GitHub 同类项目（TelcoNet Copilot / AgentOS-v1 等 8 个）对比表 + P0/P1/P2 优化路线。
 - `docs/安全加固使用指南.md`：邀请码 / 防火墙 / 限流 / Caddy HTTPS / 审计日志的使用说明。
 - `TeleOps_项目梳理.md`：功能盘点（v0.7 级基线）。
 - `接入层设计.md`：外部运维系统接入内核的设计。

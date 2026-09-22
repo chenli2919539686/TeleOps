@@ -27,7 +27,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, Any
+import threading
+from typing import Optional, Dict, Any, List
 
 # 让项目根（含 src）进入导入路径
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +53,7 @@ from src.core.requirement_board import RequirementBoard
 from src.core import db
 from src.core import auth
 from src.core import metrics
+from src.core import approvals
 from src.core import rate_limit as rl
 from src.core import usage
 from src.core.alert_stream import AlertStream, build_playlist
@@ -64,12 +66,16 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.22"
+VERSION = "0.8.24"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
 # 设了码=只有拿到码的人能注册；不设=保持原先无门槛注册（向后兼容）。
 INVITE_CODE = os.environ.get("TELEOPS_INVITE_CODE", "").strip()
+
+# 人工审批闸（HITL）：TELEOPS_REQUIRE_APPROVAL=1 时，研发造工具等高风险动作
+# 不再直接执行，而是落 pending 审批单，由管理员批准后才真正执行（企业级安全护栏）。
+REQUIRE_APPROVAL = os.environ.get("TELEOPS_REQUIRE_APPROVAL", "").strip() in ("1", "true", "True")
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
 # 默认仅放行本地前端（8001）；生产/Spaces 部署请通过 TELEOPS_CORS_ORIGINS 显式放行域名，
@@ -366,6 +372,23 @@ adapters = AdapterRegistry()        # 外部系统适配器注册表（含预留
 _streams: Dict[str, AlertStream] = {}
 _streams_lock = threading.Lock()
 _STREAM_GLOBAL_KEY = "__global__"   # 兼容旧调用（不传 workspace_id）的全局槽位
+
+
+_LLM_MAX = int(os.environ.get("TELEOPS_LLM_CONCURRENCY", "4"))
+LLM_SEM = threading.Semaphore(_LLM_MAX)
+_AGENT_SEM_LOCK = threading.Lock()
+_AGENT_SEMS = {}
+_AGENT_MAX = int(os.environ.get("TELEOPS_AGENT_CONCURRENCY", "2"))
+
+
+def _agent_sem(aid):
+    """每 Agent 有界并发信号量（懒创建），防止单 Agent 被并发打爆。"""
+    with _AGENT_SEM_LOCK:
+        s = _AGENT_SEMS.get(aid)
+        if s is None:
+            s = threading.Semaphore(_AGENT_MAX)
+            _AGENT_SEMS[aid] = s
+        return s
 
 
 def _stream_of(ws_id: Optional[str]) -> AlertStream:
@@ -993,28 +1016,40 @@ def _stream_resolve_ctx(ws_id, ops_agent_id, mode):
     return ops_id, mode
 
 
-def _stream_make_processor(ws_id, ops_id, mode):
+def _stream_make_processor(ws_id, ops_id, mode, route_by_alert=True):
     """单条告警处置回调：降噪 → 根因 → 工具 →（缺工具自动登记并走研发闭环）。
 
     与 webhook 接入（_ingest_flow）唯一的差别是输入来源：这里来自流水线剧本，
     后续接真实告警推送时可直接复用本函数。
     """
     def process(alert: dict) -> dict:
-        inst = registry.get_instance(ops_id)
+        # 路由：按告警特征（tags/metric/source）在该域/全局 ops Agent 中选最专长者，
+        # 取代"所有告警都喂同一个主运维 Agent"——这就是多 Agent 匹配分流（改造 A）。
+        aid = ops_id
+        if route_by_alert:
+            _req = {"workspace_id": ws_id,
+                    "tags": list(alert.get("tags") or [])
+                            + [str(alert.get("metric") or ""), str(alert.get("source") or "")],
+                    "description": alert.get("message") or "", "needed_tool": ""}
+            aid = registry.route("ops", _req, cross_domain=True) or ops_id
+        inst = registry.get_instance(aid)
         entry = {"noise": False, "summary": "", "missing_tool": "",
                  "loop": "none", "tool_name": "", "error": ""}
         if not inst:
-            entry["error"] = f"ops agent {ops_id} 不存在"
+            entry["error"] = f"ops agent {aid} 不存在"
             return entry
-        registry.set_status(ops_id, "busy")
+        registry.set_status(aid, "busy")
         try:
-            out = inst.handle_alert(alert)
+            # 并发隔离（改造 B）：全局 LLM 信号量防多域/多流踩 DeepSeek 配额，
+            # 每 Agent 信号量防单 Agent 被并发打爆。任一 Agent 过载时在此排队而非阻塞进程。
+            with LLM_SEM, _agent_sem(aid):
+                out = inst.handle_alert(alert)
         except Exception as e:
             entry["error"] = f"{type(e).__name__}: {e}"
             entry["summary"] = "处置异常，已跳过（不打断流水线）"
             return entry
         finally:
-            registry.set_status(ops_id, "idle")
+            registry.set_status(aid, "idle")
         norm = out.get("normalized") or {}
         entry["noise"] = bool(norm.get("is_noise"))
         entry["triage_by"] = norm.get("triage_by") or ""
@@ -1111,7 +1146,8 @@ def stream_start(req: StreamStartReq, request: Request):
     if not playlist:
         raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
     ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
-    stream._process = _stream_make_processor(req.workspace_id, ops_id, mode)
+    stream._process = _stream_make_processor(req.workspace_id, ops_id, mode,
+                                          route_by_alert=req.ops_agent_id is None)
     started_by = (user or {}).get("username") or "匿名"
     stream.start(playlist, profile=req.profile,
                  interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
@@ -1352,29 +1388,57 @@ def agent_diagnose(agent_id: str, req: AlertReq):
 
 
 @app.post("/agents/{agent_id}/build")
+def _run_agent_build(agent_id: str, feedback: Dict[str, Any]) -> Dict[str, Any]:
+    """实际执行研发造工具流程（被 job 与审批批准共用）。"""
+    a = registry.get(agent_id)
+    inst = registry.get_instance(agent_id)
+    registry.set_status(agent_id, "busy")
+    try:
+        res = inst.fulfill_feedback(feedback)
+        _reload()
+        _save_trace("agent_build", {"agent": agent_id, "feedback": feedback, "result": res})
+        _audit_write_dummy("tool.build", a.get("workspace_id"),
+                           {"agent": agent_id, "tool": res.get("tool"),
+                            "feedback": feedback.get("feedback_id")})
+        return {"created_tool": res["tool"], "sop": res["sop"],
+                "note": "已自动注册工具并沉淀 SOP，运维 Agent 下一轮即可直接调用"}
+    finally:
+        registry.set_status(agent_id, "idle")
+
+
+def _audit_write_dummy(action, ws_id, detail):
+    """无 request 上下文时写审计（审批异步执行用）。"""
+    db.audit("system(hitl)", action, workspace_id=ws_id, detail=detail, result="ok",
+             actor_id=None, ip="internal")
+
+
 def agent_build(agent_id: str, req: FeedbackReq, request: Request):
-    """研发 Agent 工作台：运行该 Agent 的造工具流程（job 化，状态灯实时联动）。"""
+    """研发 Agent 工作台：运行该 Agent 的造工具流程（job 化，状态灯实时联动）。
+
+    企业级人工闸：开启 TELEOPS_REQUIRE_APPROVAL 时，高风险动作不直接执行，
+    而是落 pending 审批单，由管理员批准后才真正执行（HITL）。
+    """
     a = registry.get(agent_id)
     if not a:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} 不存在")
     if a["kind"] != "dev":
         raise HTTPException(status_code=400, detail=f"{agent_id} 不是研发 Agent")
-    inst = registry.get_instance(agent_id)
+    feedback = {"feedback_id": req.feedback_id, "summary": req.summary}
+
+    if REQUIRE_APPROVAL:
+        actor, _ = _actor_of(request)
+        apr_id = approvals.create(
+            subject="tool.build", requested_by=actor,
+            payload={"agent_id": agent_id, "feedback": feedback},
+            detail={"agent": agent_id, "feedback": req.feedback_id,
+                    "summary": (req.summary or "")[:120]})
+        _audit_write(request, "tool.build", a.get("workspace_id"),
+                     {"agent": agent_id, "pending": apr_id}, result="pending")
+        return {"job_id": None, "status": "pending_approval", "approval_id": apr_id,
+                "note": "已提交人工审批，管理员批准后才会真正造工具"}
 
     def flow():
-        registry.set_status(agent_id, "busy")
-        try:
-            fb = {"feedback_id": req.feedback_id, "summary": req.summary}
-            res = inst.fulfill_feedback(fb)
-            _reload()
-            _save_trace("agent_build", {"agent": agent_id, "feedback": fb, "result": res})
-            _audit_write(request, "tool.build", a.get("workspace_id"),
-                         {"agent": agent_id, "tool": res.get("tool"),
-                          "feedback": req.feedback_id})
-            return {"created_tool": res["tool"], "sop": res["sop"],
-                    "note": "已自动注册工具并沉淀 SOP，运维 Agent 下一轮即可直接调用"}
-        finally:
-            registry.set_status(agent_id, "idle")
+        _run_agent_build(agent_id, feedback)
 
     job_id = _start_job(flow)
     return {"job_id": job_id, "status": "running"}
@@ -1564,7 +1628,8 @@ def delete_agent(ws_id: str, agent_id: str, request: Request):
 
 @app.get("/audit")
 def list_audit(request: Request, limit: int = 50, offset: int = 0,
-               workspace_id: Optional[str] = None):
+               workspace_id: Optional[str] = None,
+               since: Optional[str] = None, until: Optional[str] = None):
     """操作审计日志（多租户问责）：谁在何时对哪个业务域做了什么。
 
     隔离规则（与读写隔离同口径）：
@@ -1573,6 +1638,8 @@ def list_audit(request: Request, limit: int = 50, offset: int = 0,
       （auth.login / auth.logout / auth.register 等 workspace_id 为空的动作）
     - 匿名：401
     - 指定 workspace_id 时先校验可见性，越权/不存在 → 404（不暴露域是否存在）
+
+    since/until：审计回放时间范围（ISO 字符串，按 ts 字典序过滤，兼容 ISO 格式）。
     """
     user = getattr(request.state, "user", None)
     if not user:
@@ -1596,6 +1663,16 @@ def list_audit(request: Request, limit: int = 50, offset: int = 0,
             where = (f"WHERE (workspace_id IN ({ph}) "
                      "OR (workspace_id IS NULL AND actor_id=?))")
             params = list(visible) + [uid]
+
+    if since or until:
+        clauses = []
+        if since:
+            clauses.append("ts >= ?")
+            params = list(params) + [since]
+        if until:
+            clauses.append("ts <= ?")
+            params = list(params) + [until]
+        where = f"{where} AND {' AND '.join(clauses)}" if where else f"WHERE {' AND '.join(clauses)}"
 
     safe_limit = max(1, min(int(limit), 500))
     safe_offset = max(0, int(offset))
@@ -1662,6 +1739,188 @@ def _ingest_flow(req: AdapterAlertIngestReq):
         "ops_agent_id": ops_id,
         "results": results,
     }
+
+
+# ---------------- 人工审批（HITL）端点（P1③） ----------------
+class ApprovalDecisionReq(BaseModel):
+    note: str = ""
+
+
+@app.get("/approvals")
+def list_approvals(request: Request, status: Optional[str] = None):
+    """列出审批单。管理员看全部；普通用户只看自己发起/处置的。"""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="需要登录")
+    uid = user.get("uid")
+    actor, _ = _actor_of(request)
+    items = approvals.list_items(status=status, uid=(None if user.get("is_admin") else actor))
+    return {"items": items, "total": len(items),
+            "require_approval": REQUIRE_APPROVAL}
+
+
+@app.post("/approvals/{apr_id}/approve")
+def approve_apr(apr_id: str, req: ApprovalDecisionReq, request: Request):
+    """批准审批单；若为 tool.build，批准即真正执行研发造工具（HITL 闭环）。"""
+    user = getattr(request.state, "user", None)
+    if not user or not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="仅管理员可审批")
+    item = approvals.get(apr_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="审批单不存在")
+    decided = approvals.decide(apr_id, "approved", user.get("sub"))
+    _audit_write(request, "approval.approve", item.get("payload", {}).get("workspace_id"),
+                 {"approval_id": apr_id, "subject": item["subject"], "note": req.note})
+    # 批准即执行：目前仅 tool.build 需要真正落地
+    if item["subject"] == "tool.build" and item.get("payload"):
+        try:
+            _run_agent_build(item["payload"]["agent_id"], item["payload"]["feedback"])
+        except Exception as e:  # noqa: BLE001
+            decided = approvals.decide(apr_id, "approved_failed", user.get("sub"))
+            return {"approval": decided, "executed": False, "error": str(e)}
+    return {"approval": decided, "executed": item["subject"] == "tool.build"}
+
+
+@app.post("/approvals/{apr_id}/reject")
+def reject_apr(apr_id: str, req: ApprovalDecisionReq, request: Request):
+    """拒绝审批单。"""
+    user = getattr(request.state, "user", None)
+    if not user or not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="仅管理员可审批")
+    item = approvals.get(apr_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="审批单不存在")
+    decided = approvals.decide(apr_id, "rejected", user.get("sub"))
+    _audit_write(request, "approval.reject", item.get("payload", {}).get("workspace_id"),
+                 {"approval_id": apr_id, "subject": item["subject"], "note": req.note})
+    return {"approval": decided}
+
+
+# ---------------- 量化指标看板（P0② / P2⑥） ----------------
+@app.post("/metrics/run")
+def metrics_run(request: Request):
+    """服务端重跑闭环评估脚本，刷新 data/eval_results.json 并返回最新指标。"""
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="需要登录")
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "scripts/eval_closed_loop.py"],
+                       cwd=str(ROOT), check=True, capture_output=True, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"评估运行失败：{e}")
+    return metrics_summary(request)
+
+
+@app.get("/metrics/summary")
+def metrics_summary(request: Request):
+    """闭环量化指标：根因 Top-1 / 噪声抑制率 / 修复成功率(仿真) / 平均决策时延。
+
+    diagnosis 段用离线标注数据验证；remediation 段用仿真靶机验证（明确标注 simulated）。
+    实时部分附带当前告警流与适配器健康概况。
+    """
+    eval_path = Path("data/eval_results.json")
+    eval_data = None
+    if eval_path.exists():
+        try:
+            eval_data = json.loads(eval_path.read_text(encoding="utf-8"))
+        except Exception:
+            eval_data = None
+    with _streams_lock:
+        running = {k: s.status() for k, s in _streams.items() if s.running}
+    live = {
+        "active_streams": len(running),
+        "streams": running,
+        "adapters": len(adapters.list()),
+        "tools": len(tools.list_tools()),
+    }
+    return {"eval": eval_data, "live": live,
+            "env_note": "diagnosis=offline-labeled, remediation=simulated"}
+
+
+# ---------------- OIDC 单点登录（P2⑤，含 dev mock） ----------------
+OIDC_ISSUER = os.environ.get("TELEOPS_OIDC_ISSUER", "").strip()
+OIDC_DEV = os.environ.get("TELEOPS_OIDC_DEV", "").strip() in ("1", "true", "True") or not OIDC_ISSUER
+
+
+def _decode_id_token_unverified(id_token: str) -> Dict[str, Any]:
+    """仅用于本地 dev mock：不校验签名，直接解 payload（生产须走 JWKS 验签）。"""
+    try:
+        part = id_token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        import base64
+        return json.loads(base64.urlsafe_b64decode(part))
+    except Exception:
+        return {}
+
+
+@app.get("/auth/oidc/login")
+def oidc_login():
+    """发起 OIDC 登录：返回跳转 URL。
+
+    dev mock（无真实 IdP）：跳回 /auth/oidc/callback?dev_user=... 直接演示。
+    真实 IdP（配了 TELEOPS_OIDC_ISSUER）：返回标准 authorize 重定向地址。
+    """
+    if OIDC_DEV:
+        return {"redirect_url": "/auth/oidc/callback?dev_user=demo@oidc.local&name=OIDCDemo",
+                "mode": "dev"}
+    return {"redirect_url": (f"{OIDC_ISSUER}/authorize?response_type=code"
+                             f"&client_id={os.environ.get('TELEOPS_OIDC_CLIENT_ID','')}"
+                             f"&redirect_uri={os.environ.get('TELEOPS_OIDC_REDIRECT','')}"
+                             f"&scope=openid%20email%20profile"),
+            "mode": "live"}
+
+
+@app.post("/auth/oidc/callback")
+def oidc_callback(dev_user: Optional[str] = None, name: Optional[str] = None,
+                  code: Optional[str] = None, id_token: Optional[str] = None):
+    """OIDC 回调：校验身份后签发 TeleOps JWT。
+
+    dev_user 模式（demo）：按邮箱 upsert 用户并直接签发。
+    id_token 模式：解 payload 取 sub/email（生产应 JWKS 验签），upsert 并签发。
+    """
+    sub_email = None
+    display = name or "OIDCUser"
+    if dev_user:
+        sub_email = dev_user
+        display = name or dev_user.split("@")[0]
+    elif id_token:
+        claims = _decode_id_token_unverified(id_token)
+        sub_email = claims.get("email") or claims.get("sub")
+        display = claims.get("name") or (sub_email or "oidc").split("@")[0]
+    if not sub_email:
+        raise HTTPException(status_code=400, detail="未获取到 OIDC 身份")
+    u = auth.get_user(sub_email)
+    if not u:
+        u = auth.create_user(sub_email, os.urandom(12).hex())
+    token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
+    db.audit(u["username"], "auth.oidc", result="ok", actor_id=u["id"],
+             ip="oidc")
+    return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]},
+            "mode": "dev" if OIDC_DEV else "live"}
+
+
+# ---------------- Grafana / Prometheus 指标查询（P1④，MCP 风格） ----------------
+class MetricsQueryReq(BaseModel):
+    promql: str = "up"
+    hours: int = 1
+
+
+@app.post("/adapters/{adapter_id}/query")
+def adapter_query(adapter_id: str, req: MetricsQueryReq):
+    """让 Agent / 前端主动查询真实监控指标（Grafana/Prometheus）。
+
+    未配置真实 base_url 时返回仿真时序；配置后接真实 Prometheus /api/v1/query_range。
+    """
+    adp = adapters.get(adapter_id)
+    if not adp:
+        raise HTTPException(status_code=404, detail=f"adapter {adapter_id} 不存在")
+    if not hasattr(adp, "query_metrics"):
+        raise HTTPException(status_code=400, detail=f"{adp.id} 不支持指标查询")
+    try:
+        return adp.query_metrics(req.promql, hours=req.hours)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"查询失败：{e}")
 
 
 # ---------------- 静态前端：单端口同时提供 API 与界面 ----------------

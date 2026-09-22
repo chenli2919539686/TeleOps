@@ -42,6 +42,7 @@ class WorkspaceStore:
         self.registry = registry
         if self._count_workspaces() == 0:
             self._seed_default()
+        self._ensure_default_agents()
         self._sync_registry()
 
     # ---------------- 启动：从 SQLite 同步进 AgentRegistry ----------------
@@ -56,6 +57,24 @@ class WorkspaceStore:
                 "INSERT OR IGNORE INTO agents "
                 "(id,workspace_id,name,kind,scope,description,is_primary,status) VALUES (?,?,?,?,?,?,?,?)",
                 (a["id"], w["id"], a["name"], a["kind"], json.dumps(a.get("scope", []), ensure_ascii=False),
+                 a.get("description", ""), 1 if a.get("primary") else 0, "idle"))
+
+    def _ensure_default_agents(self):
+        """迁移补种：保证核心网公共域具备默认的多专长 Agent 矩阵（含 2 个运维 Agent），
+
+        使 registry.route 按 scope 交集的告警分流在公共域天然生效。幂等（INSERT OR IGNORE）。
+
+        已存在 DB 的库不会重跑 _seed_default，故用本函数补齐核心-net 的默认 Agent。
+
+        """
+        wid = DEFAULT_WORKSPACE["id"]
+        if not db.query_one("SELECT 1 FROM workspaces WHERE id=?", (wid,)):
+            return
+        for a in DEFAULT_WORKSPACE["agents"]:
+            db.execute(
+                "INSERT OR IGNORE INTO agents "
+                "(id,workspace_id,name,kind,scope,description,is_primary,status) VALUES (?,?,?,?,?,?,?,?)",
+                (a["id"], wid, a["name"], a["kind"], json.dumps(a.get("scope", []), ensure_ascii=False),
                  a.get("description", ""), 1 if a.get("primary") else 0, "idle"))
 
     def _sync_registry(self):

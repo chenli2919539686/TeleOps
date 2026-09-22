@@ -71,33 +71,51 @@ class AgentRegistry:
         return None
 
     # ---------------- 路由：按业务域隔离 + scope 交集，否则轮询 ----------------
-    def route(self, kind, requirement: dict):
+    def route(self, kind, requirement: dict, cross_domain: bool = False):
+        """按 scope 交集在 ops/dev Agent 中选最匹配者。
+
+        优先级：① 同业务域内 scope 与需求 tags 有交集 → 取最高分；
+                ② 同域无匹配 → 放宽到全局同 kind Agent 再算一次（让个人域也能用到
+                   公共域的专长 Agent，Agent 实例是通用编排器，域只是归属标签，跨域执行安全）；
+                ③ 仍无匹配 → 同域轮询兜底。
+        requirement 约定：{workspace_id, tags[], description, needed_tool}
+        """
         ws = requirement.get("workspace_id")
-        # 优先在同业务域内路由，遵守"每域独立一套 Agent"的设计承诺
-        cands = [a for a in self.agents.values()
-                 if a["kind"] == kind and (ws is None or a.get("workspace_id") == ws)]
-        if not cands:
-            # 同域无候选（理论上不会发生，建域时强制塞入 ops+dev），放宽到全局兜底
-            cands = [a for a in self.agents.values() if a["kind"] == kind]
-            if not cands:
-                return None
         tags = set(requirement.get("tags", []) or [])
         hint = (requirement.get("needed_tool", "") + " " +
                 requirement.get("description", ""))
-        scored = []
-        for a in cands:
-            if tags:
-                score = len(set(a["scope"]) & tags)
-            else:
-                score = sum(1 for s in a["scope"] if s in hint)
-            scored.append((score, a["id"]))
-        scored.sort(key=lambda x: -x[0])
-        if scored[0][0] > 0:
-            return scored[0][1]
-        # 轮询兜底（限定在同域候选集合内）
-        i = self._rr[kind] % len(cands)
+
+        def _score(cands):
+            scored = []
+            for a in cands:
+                if tags:
+                    s = len(set(a["scope"]) & tags)
+                else:
+                    s = sum(1 for x in a["scope"] if x and x in hint)
+                scored.append((s, a["id"]))
+            scored.sort(key=lambda x: -x[0])
+            return scored
+
+        domain = [a for a in self.agents.values()
+                  if a["kind"] == kind and (ws is None or a.get("workspace_id") == ws)]
+        if not domain:
+            domain = [a for a in self.agents.values() if a["kind"] == kind]
+            if not domain:
+                return None
+        sc = _score(domain)
+        if sc[0][0] > 0:
+            return sc[0][1]
+        # 同域无匹配 → 仅当允许跨域时放宽到全局同 kind（告警处置可跨域用公共域专长
+        # Agent；研发需求派发默认不跨域，避免造出的工具串域归属错乱）
+        if cross_domain and ws is not None:
+            g = [a for a in self.agents.values() if a["kind"] == kind]
+            sg = _score(g)
+            if sg[0][0] > 0:
+                return sg[0][1]
+        # 轮询兜底（同域优先）
+        i = self._rr[kind] % len(domain)
         self._rr[kind] += 1
-        return cands[i]["id"]
+        return domain[i]["id"]
 
     def set_status(self, agent_id, status):
         if agent_id in self.agents:
