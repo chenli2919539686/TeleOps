@@ -6,7 +6,7 @@
   <title>TeleOps · 智能体平台</title>
   <link rel="icon" href="logo.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="styles.css?v=0.8.7" />
+  <link rel="stylesheet" href="styles.css?v=0.8.23" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
@@ -39,6 +39,9 @@
         <button class="nav-item" data-view="loop"><span class="nav-ico">🔄</span>闭环看板</button>
         <button class="nav-item" data-view="board"><span class="nav-ico">📥</span>消息栏</button>
         <button class="nav-item" data-view="integ"><span class="nav-ico">🔌</span>接入层</button>
+        <div class="nav-sep"></div>
+        <button class="nav-item" data-view="metrics"><span class="nav-ico">📊</span>指标看板</button>
+        <button class="nav-item" data-view="approvals"><span class="nav-ico">✅</span>审批队列</button>
         <div class="nav-sep"></div>
         <button class="nav-item" data-view="topo"><span class="nav-ico">🕸️</span>拓扑视图</button>
         <button class="nav-item" data-view="tools"><span class="nav-ico">📦</span>工具库</button>
@@ -261,6 +264,37 @@
         </div>
       </section>
 
+      <!-- 指标看板（闭环量化：根因 Top-1 / 噪声抑制率 / 修复成功率(仿真) / 决策时延） -->
+      <section class="view" id="view-metrics">
+        <header class="view-head">
+          <h1>📊 指标看板 · 闭环量化</h1>
+          <p><b>诊断段</b>用已知真实根因的标注故障离线验证；<b>修复段</b>把推荐动作作用到仿真靶机验证（<code>remediation=simulated</code>，非生产验证，诚实标注）。点「运行闭环评估」会在服务端重跑 <code>scripts/eval_closed_loop.py</code> 并刷新指标。</p>
+        </header>
+        <div class="metrics-actions">
+          <button class="primary-btn" id="metricsRun">▶ 运行闭环评估</button>
+          <button class="ghost-btn" id="metricsPush5g">📡 推送 5G 样例告警</button>
+        </div>
+        <div class="metrics-cards" id="metricsCards">
+          <div class="empty">点击「运行闭环评估」生成指标（或后端已落 <code>data/eval_results.json</code>）。</div>
+        </div>
+        <div class="metrics-live" id="metricsLive"></div>
+        <div class="metrics-detail" id="metricsEval"></div>
+      </section>
+
+      <!-- 审批队列（HITL 人工闸） -->
+      <section class="view" id="view-approvals">
+        <header class="view-head">
+          <h1>✅ 审批队列 · 人工闸（HITL）</h1>
+          <p>开启 <code>TELEOPS_REQUIRE_APPROVAL=1</code> 后，研发造工具等高风险动作不再直接执行，而是落此待管理员批准。当前状态：<b id="aprMode">—</b>。批准后即真正执行（tool.build 会跑研发造工具）。</p>
+        </header>
+        <div class="metrics-actions">
+          <button class="ghost-btn" id="aprRefresh">🔄 刷新</button>
+        </div>
+        <div class="apr-list" id="aprList">
+          <div class="empty">暂无审批单。</div>
+        </div>
+      </section>
+
       <!-- 拓扑 -->
       <section class="view" id="view-topo">
         <header class="view-head">
@@ -314,6 +348,9 @@
             </select>
           </label>
           <button class="ghost-btn" id="auditRefresh">🔄 刷新</button>
+          <label class="audit-field"><span>起</span><input id="auditSince" type="datetime-local" /></label>
+          <label class="audit-field"><span>止</span><input id="auditUntil" type="datetime-local" /></label>
+          <button class="ghost-btn" id="auditReplay">▶ 回放</button>
           <span class="audit-scope" id="auditScope"></span>
         </div>
         <div class="audit-wrap">
@@ -541,6 +578,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.21"></script>
+  <script src="app.js?v=0.8.23"></script>
 </body>
 </html>

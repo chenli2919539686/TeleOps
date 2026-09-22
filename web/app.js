@@ -69,6 +69,8 @@ $$(".nav-item").forEach((btn) => {
     if (v === "overview") loadOverview();
     if (v === "stream") streamEnter();
     if (v === "audit") renderAudit();
+    if (v === "metrics") renderMetrics();
+    if (v === "approvals") renderApprovals();
   });
 });
 
@@ -723,8 +725,12 @@ async function renderAudit() {
   syncAuditWsOptions();
   const wsId = ($("#auditWs") || {}).value || "";
   const limit = ($("#auditLimit") || {}).value || "50";
+  const since = ($("#auditSince") || {}).value || "";
+  const until = ($("#auditUntil") || {}).value || "";
   const qs = `?limit=${encodeURIComponent(limit)}` +
-             (wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : "");
+             (wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : "") +
+             (since ? `&since=${encodeURIComponent(since.replace("T", " "))}` : "") +
+             (until ? `&until=${encodeURIComponent(until.replace("T", " "))}` : "");
   try {
     const r = await apiFetch(`/audit${qs}`);
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -762,6 +768,152 @@ async function renderAudit() {
 $("#auditRefresh").onclick = () => renderAudit();
 $("#auditWs").onchange = () => renderAudit();
 $("#auditLimit").onchange = () => renderAudit();
+$("#auditReplay").onclick = () => auditReplay();
+
+// 审计回放：按时间范围拉取记录，逐步高亮播放（像看录像带）
+let _replayTimer = null;
+async function auditReplay() {
+  const body = $("#auditBody");
+  if (!body) return;
+  if (_replayTimer) { clearInterval(_replayTimer); _replayTimer = null; }
+  const since = ($("#auditSince") || {}).value || "";
+  const until = ($("#auditUntil") || {}).value || "";
+  if (!since && !until) { alert("请先选择「起/止」时间范围再回放"); return; }
+  renderAudit();
+  await new Promise((r) => setTimeout(r, 300));
+  const rows = Array.from(body.querySelectorAll("tr"));
+  if (!rows.length) { alert("该时间范围内没有审计记录"); return; }
+  rows.forEach((tr) => tr.classList.remove("replay-hl"));
+  let i = 0;
+  _replayTimer = setInterval(() => {
+    if (i > 0) rows[i - 1].classList.remove("replay-hl");
+    if (i >= rows.length) { clearInterval(_replayTimer); _replayTimer = null; return; }
+    rows[i].classList.add("replay-hl");
+    rows[i].scrollIntoView({ block: "center", behavior: "smooth" });
+    i++;
+  }, 700);
+}
+
+// ================= OIDC 单点登录（dev mock / 真实 IdP） =================
+async function oidcLoginFlow() {
+  try {
+    const d = await apiFetch("/auth/oidc/login").then(r => r.json());
+    if (d.mode === "dev") {
+      // dev mock：直接走回调拿 token
+      const cb = await apiFetch(d.redirect_url.replace("/auth/oidc/callback", "/auth/oidc/callback?dev_user=demo@oidc.local")).then(r => r.json());
+      if (cb.token) { setJwt(cb.token, cb.user); checkAuth(); }
+    } else {
+      // 真实 IdP：浏览器跳转授权
+      window.location.href = d.redirect_url;
+    }
+  } catch (e) { alert("OIDC 登录失败：" + e.message); }
+}
+
+// ================= 指标看板（闭环量化） =================
+function _metricCard(label, val, pct, sub) {
+  const cls = pct >= 90 ? "good" : pct >= 70 ? "mid" : "low";
+  return `<div class="mcard ${cls}">
+    <div class="mcard-val">${val}</div>
+    <div class="mcard-label">${label}</div>
+    <div class="mcard-sub">${sub || ""}</div>
+  </div>`;
+}
+async function renderMetrics() {
+  const cards = $("#metricsCards"), live = $("#metricsLive"), detail = $("#metricsEval");
+  if (!cards) return;
+  try {
+    const d = await apiFetch("/metrics/summary").then(r => r.json());
+    const ev = d.eval || {};
+    cards.innerHTML = _metricCard("根因 Top-1 准确率", (ev.root_cause_top1_accuracy * 100).toFixed(1) + "%",
+        ev.root_cause_top1_accuracy * 100, "诊断段·离线标注验证")
+      + _metricCard("噪声抑制率", (ev.noise_suppression_rate * 100).toFixed(1) + "%",
+        ev.noise_suppression_rate * 100, "降噪层过滤占比")
+      + _metricCard("修复成功率（仿真）", (ev.remediation_success_rate_sim * 100).toFixed(1) + "%",
+        ev.remediation_success_rate_sim * 100, "修复段·仿真靶机验证")
+      + _metricCard("平均决策时延", (ev.avg_decision_latency_s || "—") + "s", 80, "仿真决策节拍");
+    live.innerHTML = `<div class="metrics-live-row">实时：活跃告警流 <b>${d.live.active_streams}</b> · 适配器 <b>${d.live.adapters}</b> · 工具 <b>${d.live.tools}</b></div>`
+      + `<div class="metrics-note">验证口径：${escapeHtml(d.env_note || "")} ｜ ${escapeHtml(ev.env_label || "")}</div>`;
+    if (ev.details) {
+      detail.innerHTML = `<h3>评估明细（${ev.total_incidents} 条）</h3><table class="audit-table"><thead>`
+        + `<tr><th>ID</th><th>预测根因</th><th>真实根因</th><th>Top-1</th><th>动作</th><th>恢复</th></tr></thead><tbody>`
+        + ev.details.map((x) => `<tr class="${x.noise ? "row-noise" : ""}">
+          <td>${escapeHtml(x.id)}</td>
+          <td>${escapeHtml(x.predicted_root || "—")}</td>
+          <td>${escapeHtml(x.true_root || "—")}</td>
+          <td>${x.noise ? "噪声" : (x.top1 ? "✅" : "❌")}</td>
+          <td>${escapeHtml(x.action || "—")}</td>
+          <td>${x.noise ? "—" : (x.recovered ? "✅" : "❌")}</td>
+        </tr>`).join("") + `</tbody></table>`;
+    } else {
+      detail.innerHTML = `<div class="empty">尚无评估数据，点上方「运行闭环评估」生成。</div>`;
+    }
+  } catch (e) {
+    cards.innerHTML = `<div class="empty">指标加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+$("#metricsRun").onclick = async () => {
+  const cards = $("#metricsCards");
+  cards.innerHTML = '<div class="empty">评估运行中…（服务端重跑 scripts/eval_closed_loop.py）</div>';
+  try {
+    await apiFetch("/metrics/run", { method: "POST" });
+    renderMetrics();
+  } catch (e) { cards.innerHTML = `<div class="empty">评估失败：${escapeHtml(e.message)}</div>`; }
+};
+$("#metricsPush5g").onclick = async () => {
+  const payload = { alerts: [
+    { labels: { alertname: "CellRRCLow", instance: "Cell-VLAN-01:5600", job: "5g", severity: "critical" },
+      annotations: { description: "小区 Cell-VLAN-01 的 RRC_setup_success_rate=0.91 低于阈值 0.98", value: "0.91" },
+      startsAt: new Date().toISOString() },
+    { labels: { alertname: "CellPRBHigh", instance: "Cell-VLAN-02:5600", job: "5g", severity: "major" },
+      annotations: { description: "小区 Cell-VLAN-02 的 PRB_utilization=0.96 超过阈值 0.85", value: "0.96" },
+      startsAt: new Date().toISOString() },
+  ] };
+  try {
+    const r = await apiFetch("/adapters/alert/ingest?adapter_id=alert-5g", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    if (r.ok) { alert("已推送 5G 样例告警，运维 Agent 将做根因分析（可在「实时告警流」查看）"); }
+    else { const t = await r.text(); alert("推送失败：" + t); }
+  } catch (e) { alert("推送失败：" + e.message); }
+};
+
+// ================= 审批队列（HITL） =================
+async function renderApprovals() {
+  const list = $("#aprList"), mode = $("#aprMode");
+  if (!list) return;
+  if (!USER) { list.innerHTML = '<div class="empty">请先登录</div>'; return; }
+  try {
+    const d = await apiFetch("/approvals").then(r => r.json());
+    if (mode) mode.textContent = d.require_approval ? "已开启（高风险动作需审批）" : "未开启（设 TELEOPS_REQUIRE_APPROVAL=1 启用）";
+    const items = d.items || [];
+    if (!items.length) { list.innerHTML = '<div class="empty">暂无审批单。</div>'; return; }
+    list.innerHTML = items.map((it) => {
+      const canDecide = USER && USER.is_admin && it.status === "pending";
+      return `<div class="apr-card st-${it.status}">
+        <div class="apr-head"><span class="apr-sub">${escapeHtml(it.subject)}</span>
+          <span class="apr-badge ${it.status}">${it.status}</span></div>
+        <div class="apr-meta">发起人：${escapeHtml(it.requested_by || "—")} · ${escapeHtml(it.created_at || "")}</div>
+        <div class="apr-detail">${escapeHtml(JSON.stringify(it.detail || it.payload || ""))}</div>
+        ${canDecide ? `<div class="apr-actions">
+          <button class="primary-btn sm" data-apr="${it.id}" data-dec="approve">✅ 批准并执行</button>
+          <button class="ghost-btn sm" data-apr="${it.id}" data-dec="reject">❌ 拒绝</button></div>` : ""}
+      </div>`;
+    }).join("");
+    list.querySelectorAll("[data-apr]").forEach((b) => {
+      b.onclick = async () => {
+        const id = b.dataset.apr, dec = b.dataset.dec;
+        try {
+          const r = await apiFetch(`/approvals/${id}/${dec}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          if (r.ok) renderApprovals();
+          else alert("操作失败：" + (await r.text()));
+        } catch (e) { alert("操作失败：" + e.message); }
+      };
+    });
+  } catch (e) {
+    list.innerHTML = `<div class="empty">审批单加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+$("#aprRefresh").onclick = () => renderApprovals();
 
 // ---------- 接入层 / 适配器 ----------
 const ADP_ICON = { alert: "🚨", log: "📜", cmdb: "🗺️", ticket: "🎫", exec: "⚙️", knowledge: "📚" };
@@ -1916,8 +2068,10 @@ function renderAuthArea() {
       + `<button class="ghost-btn sm" id="logoutBtn">登出</button>`;
     box.querySelector("#logoutBtn").onclick = logout;
   } else {
-    box.innerHTML = `<button class="ghost-btn" id="loginBtn">🔐 登录</button>`;
+    box.innerHTML = `<button class="ghost-btn" id="loginBtn">🔐 登录</button>`
+      + `<button class="ghost-btn sm" id="oidcBtn">🔑 SSO</button>`;
     box.querySelector("#loginBtn").onclick = () => openLogin("");
+    box.querySelector("#oidcBtn").onclick = oidcLoginFlow;
   }
 }
 

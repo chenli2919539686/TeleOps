@@ -327,3 +327,198 @@ class ELKLogAdapter(LogAdapter):
                     "cluster": info.get("cluster_name", ""), "version": info.get("version", {}).get("number", "")}
         except Exception as e:  # noqa: BLE001
             return {"reachable": False, "mode": "live", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 5G KPI 告警接入（北向·感知）—— 真实电信数据集落地（P0①）
+# ---------------------------------------------------------------------------
+class FiveGKpiAdapter(AlertAdapter):
+    """对接 5G 小区 KPI / 性能指标（如 uccmisl/5Gdataset、OSS 导出的小区级指标）。
+
+    parse_webhook 接受两种形态：
+      1. 单条 KPI：{cell, metric, value, threshold, unit, ts, severity}
+      2. 批量列表 / OSS 导出行：[{cell_id, kpi_name, kpi_value, ...}, ...]
+
+    超过阈值即转成统一 Alert（severity 按越界幅度映射），可直接喂进 alert_stream
+    的运维 Agent 根因分析——这就是「把公开日志换成真实电信数据」的落地点。
+
+    未配置真实数据源时回退 demo fixture（结构一致：小区级 RRC/PRB/丢包等指标），
+    保证演示与单测不依赖外网；配置 data/adapters.json 的 alert-5g 后即接真实数据。
+    """
+    id = "alert-5g"
+    name = "5G 小区 KPI 告警接入"
+    system = "5G 网管 / OSS（小区级 KPI）"
+    direction = NORTH
+    status = "sample"
+    description = "把 5G 小区 KPI（RRC 建立成功率/PRB 利用率/丢包率等）超阈转成内核统一 Alert；配置 alert-5g 后接真实数据集。"
+
+    def __init__(self, config: Optional[dict] = None):
+        # 当前 demo 兜底即可；真实数据集路径/凭据放这里（data/adapters.json[alert-5g]）
+        self._config = config or {}
+
+    # 指标 -> 严重度映射（越界幅度）
+    _SEV_BY_RATIO = [
+        (0.30, "critical"), (0.15, "major"), (0.05, "warning"), (0.0, "info"),
+    ]
+
+    def parse_webhook(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        items = payload if isinstance(payload, list) else [payload]
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            cell = it.get("cell") or it.get("cell_id") or it.get("Cell_Identity") or ""
+            metric = it.get("metric") or it.get("kpi_name") or it.get("Metric") or ""
+            try:
+                value = float(it.get("value", it.get("kpi_value", 0)) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            try:
+                threshold = float(it.get("threshold") or it.get("Threshold") or 0)
+            except (TypeError, ValueError):
+                threshold = 0.0
+            ts = it.get("ts") or it.get("Timestamp") or ""
+            # 越界幅度 -> severity
+            ratio = (value - threshold) / threshold if threshold else 0.0
+            severity = "info"
+            for r, sev in self._SEV_BY_RATIO:
+                if ratio >= r:
+                    severity = sev
+                    break
+            out.append(self.to_unified({
+                "alert_id": f"5g-{cell}-{metric}".replace(" ", "_"),
+                "ts": ts,
+                "source": "5g-kpi",
+                "metric": metric,
+                "host": str(cell),
+                "severity": severity,
+                "value": value,
+                "message": f"小区 {cell} 的 {metric}={value} 超过阈值 {threshold}"
+                           if threshold else f"小区 {cell} 的 {metric}={value}",
+                "tags": ["5g", "kpi"],
+                "is_noise": severity in ("info",) and threshold and value <= threshold,
+            }))
+        return out
+
+    def _demo_kpis(self) -> List[Dict[str, Any]]:
+        return [
+            {"cell": "Cell-VLAN-01", "metric": "RRC_setup_success_rate", "value": 0.91,
+             "threshold": 0.98, "ts": "2026-09-23T08:00:00Z"},
+            {"cell": "Cell-VLAN-02", "metric": "PRB_utilization", "value": 0.96,
+             "threshold": 0.85, "ts": "2026-09-23T08:00:00Z"},
+            {"cell": "Cell-VLAN-01", "metric": "downlink_packet_loss_rate", "value": 0.07,
+             "threshold": 0.02, "ts": "2026-09-23T08:00:00Z"},
+            {"cell": "Cell-VLAN-03", "metric": "RRC_setup_success_rate", "value": 0.995,
+             "threshold": 0.98, "ts": "2026-09-23T08:00:00Z", "is_noise": True},
+        ]
+
+    def demo_alerts(self) -> List[Dict[str, Any]]:
+        """返回一组 demo 5G 告警（供前端一键试推）。"""
+        return self.parse_webhook(self._demo_kpis())
+
+    def healthcheck(self) -> Dict[str, Any]:
+        return {"reachable": True, "mode": "demo",
+                "endpoint": "data/adapters.json[alert-5g]",
+                "note": "未配置真实数据集，demo 小区 KPI 可真实解析并喂入告警流；配置 alert-5g 后接真实 5G/OSS 数据"}
+
+
+# ---------------------------------------------------------------------------
+# Grafana / Prometheus 指标查询（北向·感知）—— MCP 风格接入真实运维系统（P1④）
+# ---------------------------------------------------------------------------
+class GrafanaAdapter(LogAdapter):
+    """对接 Grafana / Prometheus 拉取真实指标时序，让 Agent 能直接「看监控大屏」。
+
+    这是「MCP 接真实运维系统」的落地：Agent 的诊断不再只看我们喂的日志，
+    而是能主动去 Prometheus 查询实时指标（如 up、node_cpu_seconds、5G 小区 KPI）。
+
+    真实接入路径：配置 base_url（Prometheus 或 Grafana 地址）+ api_key 后，
+    query_metrics 直接调 Prometheus HTTP API（/api/v1/query_range）；
+    未配置时回退仿真时序（synthetic），保证演示与单测不依赖外部监控实例。
+    """
+    id = "metrics-grafana"
+    name = "Grafana / Prometheus 指标接入"
+    system = "Grafana / Prometheus"
+    direction = NORTH
+    status = "sample"
+    description = "从 Prometheus/Grafana 拉取指标时序供 Agent 诊断；MCP 风格标准接口，配置后接真实监控。"
+
+    def __init__(self, config: Optional[dict] = None):
+        cfg = config or {}
+        self.base_url: str = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key: str = cfg.get("api_key") or ""
+        self.datasource: str = cfg.get("datasource") or "prometheus"
+        self.verify_ssl: bool = bool(cfg.get("verify_ssl", False))
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def query_metrics(self, promql: str, hours: int = 1) -> Dict[str, Any]:
+        """查询指标时序，返回 {series: [{ts, value}], mode}。
+
+        未配置 base_url 时返回仿真时序（按 promql 关键字生成合理曲线）。
+        """
+        if not self.base_url:
+            return {"mode": "demo", "promql": promql,
+                    "series": self._synthetic_series(promql, hours)}
+        if requests is None:
+            raise RuntimeError("未安装 requests，无法查询 Prometheus")
+        end = int(time.time())
+        start = end - hours * 3600
+        step = max(30, (end - start) // 60)
+        url = f"{self.base_url}/api/v1/query_range"
+        resp = requests.get(url, params={"query": promql, "start": start,
+                                         "end": end, "step": step},
+                            headers=self._headers(), timeout=15, verify=self.verify_ssl)
+        resp.raise_for_status()
+        data = resp.json().get("data", {}).get("result", []) or []
+        series = []
+        for d in data:
+            for ts, val in d.get("values", []):
+                series.append({"ts": ts, "value": float(val)})
+        return {"mode": "live", "promql": promql, "series": series}
+
+    @staticmethod
+    def _synthetic_series(promql: str, hours: int) -> List[Dict[str, Any]]:
+        now = int(time.time())
+        n = 24
+        base = 0.5
+        if "cpu" in promql.lower():
+            base = 0.82
+        elif "mem" in promql.lower():
+            base = 0.6
+        elif "packet" in promql.lower() or "loss" in promql.lower():
+            base = 0.04
+        elif "prb" in promql.lower():
+            base = 0.9
+        series = []
+        for i in range(n):
+            t = now - (n - i) * (hours * 3600 // n)
+            v = round(base + 0.1 * ((i % 5) - 2) / 5.0, 3)
+            series.append({"ts": t, "value": max(0.0, v)})
+        return series
+
+    def fetch_recent(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
+        # 复用 query_metrics：把 free-text 当作 promql 查询，返回指标切片
+        res = self.query_metrics(query, hours=1)
+        return [{"ts": s["ts"], "metric": query, "value": s["value"],
+                 "source": "grafana", "raw": s} for s in res.get("series", [])[:limit]]
+
+    def healthcheck(self) -> Dict[str, Any]:
+        if not self.base_url:
+            return {"reachable": True, "mode": "demo",
+                    "endpoint": "<prometheus-url>/api/v1/query_range",
+                    "note": "未配置真实地址，query_metrics 返回仿真时序；配置 base_url+api_key 后接真实 Prometheus/Grafana"}
+        if requests is None:
+            return {"reachable": None, "mode": "live", "note": "未安装 requests"}
+        try:
+            resp = requests.get(f"{self.base_url}/api/v1/query",
+                                params={"query": "up"}, headers=self._headers(),
+                                timeout=10, verify=self.verify_ssl)
+            resp.raise_for_status()
+            return {"reachable": True, "mode": "live",
+                    "status": resp.json().get("status")}
+        except Exception as e:  # noqa: BLE001
+            return {"reachable": False, "mode": "live", "error": str(e)}

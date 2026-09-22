@@ -710,3 +710,43 @@ body {
   .audit-wrap { max-height: calc(100vh - 340px); }
   .audit-table td.audit-detail { max-width: 200px; }
 }
+
+/* ============ 指标看板（闭环量化） ============ */
+.metrics-actions { display: flex; gap: 10px; margin: 12px 0; }
+.metrics-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin: 8px 0 18px; }
+.mcard { border: 1px solid var(--border); border-radius: 14px; padding: 18px; background: var(--panel); text-align: center; }
+.mcard.good { border-color: rgba(52,211,153,.45); }
+.mcard.mid { border-color: rgba(251,191,36,.45); }
+.mcard.low { border-color: rgba(255,107,94,.45); }
+.mcard-val { font-size: 30px; font-weight: 700; color: var(--text); }
+.mcard.good .mcard-val { color: var(--ok); }
+.mcard.mid .mcard-val { color: var(--warn); }
+.mcard.low .mcard-val { color: var(--coral); }
+.mcard-label { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+.mcard-sub { font-size: 11px; color: var(--text-dim); opacity: .8; margin-top: 4px; }
+.metrics-live { margin: 10px 0; }
+.metrics-live-row { font-size: 13px; }
+.metrics-live-row b { color: var(--primary-2); }
+.metrics-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+.metrics-detail { margin-top: 16px; }
+.metrics-detail h3 { font-size: 15px; margin-bottom: 8px; }
+.metrics-detail .row-noise { opacity: .55; }
+
+/* ============ 审批队列（HITL） ============ */
+.apr-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.apr-card { border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: var(--panel); }
+.apr-card.st-pending { border-color: rgba(251,191,36,.5); }
+.apr-card.st-approved { border-color: rgba(52,211,153,.4); }
+.apr-card.st-rejected { border-color: rgba(255,107,94,.4); opacity: .8; }
+.apr-head { display: flex; align-items: center; justify-content: space-between; }
+.apr-sub { font-family: ui-monospace, Consolas, monospace; font-size: 13px; color: var(--primary-2); }
+.apr-badge { font-size: 11px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); }
+.apr-badge.pending { color: var(--warn); border-color: rgba(251,191,36,.5); }
+.apr-badge.approved { color: var(--ok); border-color: rgba(52,211,153,.5); }
+.apr-badge.rejected { color: var(--coral); border-color: rgba(255,107,94,.5); }
+.apr-meta { font-size: 12px; color: var(--text-dim); margin: 6px 0; }
+.apr-detail { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto; }
+.apr-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+/* 审计回放高亮 */
+.audit-table tbody tr.replay-hl { background: rgba(34,211,238,.18); outline: 1px solid var(--primary-2); }
