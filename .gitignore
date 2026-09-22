@@ -41,3 +41,5 @@ data/caddy_server.log
 # 重置/备份产物（scripts 类操作生成）
 data/_reset_*/
 data/teleops.db.bak-*
+# 闭环评估脚本产物（scripts/eval_closed_loop.py 运行时输出，非源码）
+data/eval_results.json
