@@ -8,3 +8,6 @@ fakeredis>=2.0
 # 仅在选用 Redis 后端时才需要客户端包（src/core/state_store.py 内延迟导入，非硬依赖）：
 # 设 TELEOPS_STATE_STORE=redis 前需 pip install redis
 redis>=5.0
+# D3 第三步：告警流走队列调度（TELEOPS_STREAM_EXECUTOR=queue）才需要 rq；
+# tests/test_stream_queue.py 用 fakeredis + SimpleWorker 验证入队与真实消费
+rq>=2.0

@@ -31,7 +31,6 @@ def stream_start(req: StreamStartReq, request: Request):
         raise HTTPException(
             status_code=403,
             detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
-    stream = s._stream_of(req.workspace_id)
     if req.profile not in ("mixed", "story"):
         raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
     if req.mode and req.mode not in ("auto", "manual"):
@@ -44,30 +43,35 @@ def stream_start(req: StreamStartReq, request: Request):
     # 临界区：把「已在运行检查 + 启动」做成原子，避免并发 stream_start 的 TOCTOU
     # 竞态导致同一域重复派发流水线（SSE 幂等）。
     with s._stream_op_lock:
-        if stream.running:
-            started_by = stream.status().get("started_by") or "其他人"
+        # D3：走执行器（默认线程执行器内部仍驱动 AlertStream，行为不变；
+        # TELEOPS_STREAM_EXECUTOR=queue 时改由外部 worker 消费队列播放）
+        if s.stream_executor.is_running(req.workspace_id):
+            started_by = (s.stream_executor.status(req.workspace_id).get("started_by")
+                          or "其他人")
             s._audit_write(request, "stream.start", req.workspace_id,
                          {"profile": req.profile, "already_by": started_by}, result="denied")
             raise HTTPException(
                 status_code=409,
                 detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
                        "请先停止再启动")
-        stream._process = s._stream_make_processor(req.workspace_id, ops_id, mode,
-                                              route_by_alert=req.ops_agent_id is None)
         # D3 修复：早期签发的 token 里只有标准声明 sub、没有 username，
         # 导致已登录用户的流水线被记成"由 匿名 启动"。按 username → sub 顺序取，
         # 兼容新旧 token（auth.issue_token 现已同时写入两个字段）。
         started_by = ((user or {}).get("username")
                       or (user or {}).get("sub") or "匿名")
-        stream.start(playlist, profile=req.profile,
-                     interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
-                     started_by=started_by)
+        s.stream_executor.start(
+            req.workspace_id, playlist,
+            process=s._stream_make_processor(req.workspace_id, ops_id, mode,
+                                             route_by_alert=req.ops_agent_id is None),
+            profile=req.profile, interval_ms=req.interval_ms, loop=req.loop,
+            ops_agent_id=ops_id, mode=mode, started_by=started_by)
     s._audit_write(request, "stream.start", req.workspace_id,
                  {"profile": req.profile, "mode": mode, "ops_agent_id": ops_id})
     return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
             "mode": mode, "playlist_len": len(playlist),
             "workspace_id": req.workspace_id,
-            "started_by": started_by, "detail": stream.status()}
+            "started_by": started_by,
+            "detail": s.stream_executor.status(req.workspace_id)}
 
 
 @router.post("/stream/stop")
@@ -84,13 +88,13 @@ def stream_stop(request: Request, workspace_id: Optional[str] = None):
             workspace_id, getattr(request.state, "user", None)):
         s._audit_write(request, "stream.stop", workspace_id, {}, result="denied")
         raise HTTPException(status_code=403, detail="无权停止该业务域的告警流水线")
-    stream = s._stream_of(workspace_id)
-    was_running = stream.running
-    stream.stop()
+    was_running = s.stream_executor.is_running(workspace_id)
+    s.stream_executor.stop(workspace_id)
     if was_running:
         s._audit_write(request, "stream.stop", workspace_id,
-                     {"rounds": stream.status().get("rounds", 0)})
-    return {"status": "stopped", "detail": stream.status()}
+                     {"rounds": s.stream_executor.status(workspace_id).get("rounds", 0)})
+    return {"status": "stopped",
+            "detail": s.stream_executor.status(workspace_id)}
 
 
 @router.post("/stream/reset-demo")
@@ -106,17 +110,15 @@ def stream_reset_demo(request: Request):
     if not (user or {}).get("is_admin"):
         s._audit_write(request, "demo.reset", None, {}, result="denied")
         raise HTTPException(status_code=403, detail="重置演示数据仅管理员可用")
-    with s._streams_lock:
-        running = {k: s2 for k, s2 in s._streams.items() if s2.running}
-    for s2 in running.values():
-        s2.stop()
+    # 停所有域的流水线：交给执行器（不再直接摸 _streams 这个进程内字典，
+    # 队列模式下流根本不在这个字典里）
+    running = s.stream_executor.stop_all()
     s.db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
                "AND (workspace_id IS NULL OR workspace_id='')")
     # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
     s.db.execute("DELETE FROM requirements")
-    s._audit_write(request, "demo.reset", None,
-                 {"stopped_streams": list(running.keys())})
-    return {"status": "reset", "stopped_streams": list(running.keys()),
+    s._audit_write(request, "demo.reset", None, {"stopped_streams": running})
+    return {"status": "reset", "stopped_streams": running,
             "tools": [r["name"] for r in s.db.query(
                 "SELECT name FROM tools ORDER BY name")]}
 
@@ -129,7 +131,7 @@ def stream_status(request: Request, workspace_id: Optional[str] = None):
     """
     if not s._stream_key_visible(workspace_id, request):
         raise HTTPException(status_code=404, detail="业务域不存在")
-    return s._stream_of(workspace_id).status()
+    return s.stream_executor.status(workspace_id)
 
 
 @router.get("/stream/feed")
@@ -138,7 +140,7 @@ def stream_feed(after: int = 0, request: Request = None,
     """增量拉取处置流水（seq > after），供前端像监控大屏一样滚动渲染。"""
     if not s._stream_key_visible(workspace_id, request):
         raise HTTPException(status_code=404, detail="业务域不存在")
-    return {"items": s._stream_of(workspace_id).feed(after=after)}
+    return {"items": s.stream_executor.feed(workspace_id, after=after)}
 
 
 @router.get("/stream/tasks")
@@ -150,7 +152,5 @@ def stream_tasks(limit: int = 50, agent_id: Optional[str] = None,
     """
     if not s._stream_key_visible(workspace_id, request):
         raise HTTPException(status_code=404, detail="业务域不存在")
-    items = s._stream_of(workspace_id).tasks(limit=limit)
-    if agent_id:
-        items = [t for t in items if t.get("assigned_agent") == agent_id]
-    return {"tasks": items, "running": s._stream_of(workspace_id).running}
+    items = s.stream_executor.tasks(workspace_id, limit=limit, agent_id=agent_id)
+    return {"tasks": items, "running": s.stream_executor.is_running(workspace_id)}

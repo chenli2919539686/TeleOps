@@ -64,13 +64,16 @@ from src.agents.ops_agent import OpsAgent
 from src.agents.dev_agent import DevAgent
 from src.core.agent_runtime import AgentRuntime
 from src.core.state_store import get_job_store
+from src.core.stream_state import get_stream_state_store
+from src.core.stream_executor import get_stream_executor
+from src.workers import stream_tasks
 from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.32"
+VERSION = "0.8.33"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -1235,6 +1238,21 @@ ctx._ws_primary_ops = _ws_primary_ops
 ctx._stream_of = _stream_of
 ctx._stream_resolve_ctx = _stream_resolve_ctx
 ctx._stream_make_processor = _stream_make_processor
+
+# D3 第三步：告警流调度可外部化（TELEOPS_STREAM_EXECUTOR=queue 时改走 RQ）。
+# 默认仍是线程执行器（内部代理 _stream_of/_streams），行为与改造前完全一致。
+# 队列模式下 worker 进程靠下面注册的工厂重建处置回调，所以工厂必须在这里注册好。
+def _processor_for_queue_worker(ws_id):
+    """worker 侧重建单条告警处置回调（参数从共享流状态里取）。"""
+    st = get_stream_state_store().get(ws_id) or {}
+    ops_id = st.get("ops_agent_id")
+    return _stream_make_processor(ws_id, ops_id, st.get("mode") or "auto",
+                                 route_by_alert=not ops_id)
+
+
+stream_tasks.set_processor_factory(_processor_for_queue_worker)
+stream_executor = get_stream_executor(_stream_of, streams=_streams)
+ctx.stream_executor = stream_executor
 ctx._stream_key_visible = _stream_key_visible
 ctx._audit_write = _audit_write
 ctx._resolve_alert_obj = _resolve_alert_obj
