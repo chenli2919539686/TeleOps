@@ -68,7 +68,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.26"
+VERSION = "0.8.27"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -278,90 +278,6 @@ def _mask_llm_cfg(cfg: dict) -> dict:
     out["api_key_set"] = bool(cfg.get("api_key"))
     return out
 
-
-@app.get("/llm/config")
-def get_llm_config():
-    """读取当前 LLM 配置（返回的 api_key 已被掩码）。"""
-    return _mask_llm_cfg(load_llm_config())
-
-
-@app.post("/llm/config")
-async def update_llm_config(req: LLMConfig, request: Request):
-    """保存 LLM 配置；api_key 留空/星号/已设置均表示保留原值，不覆盖。"""
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="未授权：请先登录或填写 API Token")
-    cfg = load_llm_config()
-    payload = req.dict(exclude_unset=True)
-    # 保护 api_key：空值或掩码代表不覆盖
-    if "api_key" in payload and payload["api_key"] in ("", "***", "已设置"):
-        payload.pop("api_key", None)
-    # 切换 provider 时自动回填预设 base_url / model（仅当用户没填）
-    preset = LLM_PROVIDER_PRESETS.get(payload.get("provider", cfg["provider"]), {})
-    if payload.get("provider") and payload.get("provider") != cfg.get("provider"):
-        for k in ("base_url", "model"):
-            if not payload.get(k) and preset.get(k):
-                payload[k] = preset[k]
-    cfg.update(payload)
-    save_llm_config(cfg)
-    # 同步模块级常量，让未重启的进程立即生效（尤其是 LLM_TRIAGE 开关）
-    _config_module.DEFAULT_LLM_TRIAGE = cfg.get("llm_triage", _config_module.DEFAULT_LLM_TRIAGE)
-    _config_module.LLM_TRIAGE = cfg.get("llm_triage", _config_module.LLM_TRIAGE)
-    # 热更新：让全局 LLMClient 在下次 complete 前重新初始化
-    llm._ensure_client()
-    # 预算调整后重置熔断提示，让用户下次超限能再看到日志
-    llm._budget_noticed = False
-    return _mask_llm_cfg(cfg)
-
-
-@app.get("/llm/usage")
-def get_llm_usage():
-    """LLM 用量统计 + 预算状态（今日/累计调用数、token、估算费用）。"""
-    return usage.summary()
-
-
-@app.post("/llm/usage/reset")
-def reset_llm_usage(request: Request):
-    """清空用量统计（演示重置用）。"""
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="未授权：请先登录或填写 API Token")
-    usage.reset()
-    return {"ok": True, **usage.summary()}
-
-
-@app.get("/llm/balance")
-def get_llm_balance():
-    """查询账户余额（服务端代理，API Key 不出后端）。
-
-    目前 DeepSeek 提供官方 /user/balance 接口；其他供应商尚未接入，
-    返回 supported=false，前端提示去平台控制台查看。
-    """
-    cfg = load_llm_config()
-    provider = (cfg.get("provider") or "").strip()
-    api_key = (cfg.get("api_key") or "").strip()
-    if provider != "deepseek" or not api_key:
-        return {
-            "supported": False,
-            "reason": "当前供应商暂不支持余额查询，请前往平台控制台查看",
-            "console_url": _provider_console_url(provider),
-        }
-    # 余额接口不在 /v1 下，需去掉 base_url 的版本后缀
-    base = (cfg.get("base_url") or "https://api.deepseek.com/v1").rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    url = f"{base}/user/balance"
-    try:
-        req = urllib.request.Request(
-            url, headers={"Accept": "application/json",
-                          "Authorization": f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return {"supported": True, "console_url": "https://platform.deepseek.com",
-                **data}
-    except Exception as e:
-        return {"supported": True, "error": str(e),
-                "console_url": "https://platform.deepseek.com"}
 
 
 def _provider_console_url(provider: str) -> str:
@@ -628,121 +544,8 @@ class StreamStartReq(BaseModel):
 
 
 # ---------------- 端点 ----------------
-@app.get("/api/info")
-def root():
-    return {
-        "service": "TeleOps 智能体平台",
-        "version": VERSION,
-        "llm_mode": llm.mode,
-        "dispatch_mode": dispatch_mode["value"],
-        "rate_limit": "on" if rl.ENABLED else "off",
-        "uptime_s": int(time.time() - _START_TS),
-        "agents": [a["id"] for a in registry.list()],
-        "adapters": [a["id"] for a in adapters.list()],
-        "endpoints": [
-            "/health", "/health/ready", "/metrics", "/api/info",
-            "/workspaces",             "/workspaces/{id}", "/workspaces/{id}/mode",
-            "/workspaces/{id}/agents", "/workspaces/{id} (DELETE)", "/jobs/{job_id}",
-            "/agents", "/agents/{id}/diagnose", "/agents/{id}/build",
-            "/dispatch/mode", "/requirements",
-            "/adapters", "/adapters/alert/ingest",
-            "/topology", "/tools", "/knowledge",
-            "/alert", "/chat", "/feedback", "/closed-loop/run", "/traces",
-            "/auth/status", "/workspaces/{id}/messages",
-        ],
-    }
 
 
-@app.get("/health")
-def health():
-    """liveness 探活：进程存活 + 依赖概况。字段向后兼容（docker healthcheck 仍看 status==ok）。"""
-    db_ok = False
-    try:
-        db.query_one("SELECT 1")
-        db_ok = True
-    except Exception:
-        pass
-    with _jobs_lock:
-        jobs_running = sum(1 for v in _jobs.values() if v["status"] == "running")
-    return {
-        "status": "ok",
-        "version": VERSION,
-        "llm_provider": load_llm_config().get("provider", "mock"),
-        "llm_mode": llm.mode,
-        "nodes": len(cmdb.all_nodes()),
-        "tools": len(tools.list_tools()),
-        "db": "ok" if db_ok else "error",
-        "uptime_s": int(time.time() - _START_TS),
-        "jobs_running": jobs_running,
-        "rate_limit": "on" if rl.ENABLED else "off",
-    }
-
-
-@app.get("/health/ready")
-def health_ready():
-    """readiness 就绪：DB 可查询 + 数据目录可写才上报 ready（编排器据此决定是否引流）。"""
-    db_ok = False
-    try:
-        db.query_one("SELECT 1")
-        db_ok = True
-    except Exception:
-        pass
-    dir_ok = os.access(DATA_DIR, os.W_OK)
-    ready = db_ok and dir_ok
-    return {
-        "status": "ready" if ready else "not_ready",
-        "version": VERSION,
-        "db": "ok" if db_ok else "error",
-        "data_dir_writable": dir_ok,
-    }
-
-
-_METRICS_GAUGES_REGISTERED = False
-
-
-def _register_metrics_gauges():
-    """把数据库实时状态注册为 gauge（幂等：同名重复注册即覆盖）。"""
-    global _METRICS_GAUGES_REGISTERED
-    _METRICS_GAUGES_REGISTERED = True
-    def ws_items():
-        try:
-            rows = db.query("SELECT id, mode FROM workspaces")
-            return [({}, len(rows)), ] + [({"domain": r["id"], "mode": r["mode"]}, 1) for r in rows]
-        except Exception:
-            return [({}, 0)]
-
-    def agent_items():
-        try:
-            rows = db.query("SELECT workspace_id, status FROM agents")
-            return [({"domain": r["workspace_id"], "status": r["status"]}, 1) for r in rows]
-        except Exception:
-            return []
-
-    def req_items():
-        try:
-            rows = db.query("SELECT status, workspace_id FROM requirements")
-            out = [({"domain": r["workspace_id"], "status": r["status"]}, 1) for r in rows]
-            if not out:
-                out = [({}, 0)]
-            return out
-        except Exception:
-            return [({}, 0)]
-
-    metrics.gauge("teleops_workspaces_total", "业务域总数", ws_items)
-    metrics.gauge("teleops_agents_total", "Agent 数（按域/状态）", agent_items)
-    metrics.gauge("teleops_requirements_total", "需求数（按域/状态）", req_items)
-    metrics.set_help("teleops_workspaces_total", "业务域总数")
-    metrics.set_help("teleops_agents_total", "Agent 数（按域/状态）")
-    metrics.set_help("teleops_requirements_total", "需求数（按域/状态）")
-
-
-@app.get("/metrics")
-def metrics_endpoint():
-    """Prometheus 文本格式指标（公开端点，供抓取）。"""
-    if not _METRICS_GAUGES_REGISTERED:
-        _register_metrics_gauges()
-    return Response(content=metrics.render(),
-                    media_type="text/plain; version=0.0.4")
 
 
 class AuthReq(BaseModel):
@@ -843,28 +646,6 @@ def auth_logout(request: Request):
     return {"detail": "已注销", "revoked": revoked}
 
 
-@app.get("/topology")
-def topology():
-    return load_topology()
-
-
-@app.get("/tools")
-def list_tools():
-    return {"tools": [tools.get(t) for t in tools.list_tools()]}
-
-
-@app.post("/tools/call")
-def call_tool(req: ToolCallReq):
-    try:
-        return {"result": tools.call(req.name, req.params)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/knowledge")
-def knowledge(q: str, top_k: int = 3):
-    hits = kb.retrieve(q, top_k=top_k)
-    return {"query": q, "hits": hits}
 
 
 @app.get("/alerts")
@@ -1023,17 +804,6 @@ def _closed_loop_flow(req: ClosedLoopReq):
         registry.set_status(ops_id, "idle")
 
 
-@app.get("/traces")
-def traces():
-    files = sorted(Path(TRACE_DIR).glob("*.json"))
-    return {"traces": [f.name for f in files]}
-
-
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str):
-    """轮询异步任务进度（前端据此让作战室状态灯实时刷新）。"""
-    _gc_jobs()   # 顺带清理过期任务，避免内存泄漏
-    return _jobs.get(job_id, {"status": "not_found"})
 
 
 # ---------------- 模拟告警流水线（持续监控演示，处置链路与 webhook 接入一致） ----------------
@@ -1659,65 +1429,6 @@ def delete_agent(ws_id: str, agent_id: str, request: Request):
     return {"deleted": agent_id, "workspace": ws_id}
 
 
-@app.get("/audit")
-def list_audit(request: Request, limit: int = 50, offset: int = 0,
-               workspace_id: Optional[str] = None,
-               since: Optional[str] = None, until: Optional[str] = None):
-    """操作审计日志（多租户问责）：谁在何时对哪个业务域做了什么。
-
-    隔离规则（与读写隔离同口径）：
-    - 管理员：默认看全量，可按 workspace_id 过滤
-    - 普通用户：只看「自己可见业务域」的操作 + 自己的认证类记录
-      （auth.login / auth.logout / auth.register 等 workspace_id 为空的动作）
-    - 匿名：401
-    - 指定 workspace_id 时先校验可见性，越权/不存在 → 404（不暴露域是否存在）
-
-    since/until：审计回放时间范围（ISO 字符串，按 ts 字典序过滤，兼容 ISO 格式）。
-    """
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="需要登录才能查看审计日志")
-    uid = user.get("uid")
-    is_admin = bool(user.get("is_admin"))
-
-    if workspace_id:
-        if not ws_store.is_visible_to(workspace_id, user):
-            raise HTTPException(status_code=404, detail="业务域不存在")
-        where, params = "WHERE workspace_id=?", [workspace_id]
-    elif is_admin:
-        where, params = "", []
-    else:
-        visible = ws_store.visible_workspace_ids(user=user)
-        if not visible:
-            where, params = "WHERE 1=0", []
-        else:
-            ph = ",".join("?" * len(visible))
-            # 域内操作 + 本人认证类记录（workspace_id 为空的登录/登出/注册）
-            where = (f"WHERE (workspace_id IN ({ph}) "
-                     "OR (workspace_id IS NULL AND actor_id=?))")
-            params = list(visible) + [uid]
-
-    if since or until:
-        clauses = []
-        if since:
-            clauses.append("ts >= ?")
-            params = list(params) + [since]
-        if until:
-            clauses.append("ts <= ?")
-            params = list(params) + [until]
-        where = f"{where} AND {' AND '.join(clauses)}" if where else f"WHERE {' AND '.join(clauses)}"
-
-    safe_limit = max(1, min(int(limit), 500))
-    safe_offset = max(0, int(offset))
-    rows = db.query(
-        f"SELECT * FROM audit_log {where} ORDER BY id DESC LIMIT ? OFFSET ?",
-        tuple(params) + (safe_limit, safe_offset))
-    total = db.query_one(f"SELECT COUNT(*) AS c FROM audit_log {where}",
-                         tuple(params))["c"]
-    return {"items": [dict(r) for r in rows], "total": total,
-            "limit": safe_limit, "offset": safe_offset,
-            "scope": "all" if is_admin else "own"}
-
 
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------
 @app.get("/adapters")
@@ -1948,6 +1659,45 @@ def adapter_query(adapter_id: str, req: MetricsQueryReq):
         return adp.query_metrics(req.promql, hours=req.hours)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"查询失败：{e}")
+
+
+# ---------------- API 路由挂载（D2 演进式拆分：按域从 routers/ 装配） ----------------
+# server.py 已完成全局单例与 helper 的初始化；先把跨模块共享对象挂到 ctx，
+# routers 子模块只从 ctx 读取（不 import server），切断循环依赖。
+from src.api.context import ctx
+
+ctx.VERSION = VERSION
+ctx._START_TS = _START_TS
+ctx.registry = registry
+ctx.ws_store = ws_store
+ctx.cmdb = cmdb
+ctx.kb = kb
+ctx.llm = llm
+ctx.tools = tools
+ctx.adapters = adapters
+ctx.dispatch_mode = dispatch_mode
+ctx._jobs = _jobs
+ctx._jobs_lock = _jobs_lock
+ctx._config_module = _config_module
+ctx.LLM_PROVIDER_PRESETS = LLM_PROVIDER_PRESETS
+ctx.LLMConfig = LLMConfig
+ctx._mask_llm_cfg = _mask_llm_cfg
+ctx._provider_console_url = _provider_console_url
+ctx.ToolCallReq = ToolCallReq
+ctx._gc_jobs = _gc_jobs
+
+from src.api.routers import (
+    system_router,
+    core_router,
+    traces_router,
+    llm_router,
+    audit_router,
+)
+app.include_router(system_router)
+app.include_router(core_router)
+app.include_router(traces_router)
+app.include_router(llm_router)
+app.include_router(audit_router)
 
 
 # ---------------- 静态前端：单端口同时提供 API 与界面 ----------------
