@@ -68,7 +68,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.27"
+VERSION = "0.8.28"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -648,43 +648,6 @@ def auth_logout(request: Request):
 
 
 
-@app.get("/alerts")
-def list_alerts(severity: str = "", noise: str = "", q: str = "", limit: int = 200):
-    """列出「接入业务预设」的真实告警样本（data/alerts.json，BlueGene/L 机群事件）。
-
-    支持过滤：severity=info|critical、noise=true|false、q=关键字，供前端告警浏览器与调试使用。
-    """
-    data = load_alerts()
-    alerts = data.get("alerts", [])
-    sev_cnt: dict = {}
-    noise_cnt = 0
-    for a in alerts:
-        sev_cnt[a.get("severity", "?")] = sev_cnt.get(a.get("severity", "?"), 0) + 1
-        if a.get("is_noise"):
-            noise_cnt += 1
-    if severity:
-        alerts = [a for a in alerts if a.get("severity") == severity]
-    if noise in ("true", "false"):
-        want = noise == "true"
-        alerts = [a for a in alerts if bool(a.get("is_noise")) == want]
-    if q:
-        ql = q.strip().lower()
-        alerts = [a for a in alerts
-                  if ql in " ".join(str(a.get(k, "")) for k in ("alert_id", "metric", "host", "message")).lower()]
-    return {
-        "total": len(alerts),
-        "source": "data/alerts.json · BlueGene/L 机群日志样本",
-        "summary": {"all": len(data.get("alerts", [])), "severity": sev_cnt, "noise": noise_cnt},
-        "alerts": alerts[: max(1, min(limit, 500))],
-    }
-
-
-@app.post("/alert")
-def alert(req: AlertReq):
-    job_id = _start_job(lambda: _alert_flow(req))
-    return {"job_id": job_id, "status": "running"}
-
-
 def _alert_flow(req: AlertReq):
     alert_obj = req.alert
     if alert_obj is None and req.alert_id:
@@ -708,40 +671,6 @@ def _alert_flow(req: AlertReq):
         return out
     finally:
         registry.set_status(ops_id, "idle")
-
-
-@app.post("/chat")
-def chat(req: ChatReq):
-    hits = kb.retrieve(req.question, top_k=req.top_k)
-    context = "\n".join(f"[{h['source']}] {h['text']}" for h in hits)
-    prompt = (
-        "[TASK:KBQA]\n"
-        f"你是电信云网运维知识助手。仅基于知识库内容回答问题，不要编造。\n"
-        f"问题: {req.question}\n知识库:\n{context}"
-    )
-    answer = llm.complete(prompt)
-    return {"question": req.question, "answer": answer, "retrieved": hits}
-
-
-@app.post("/feedback")
-def feedback(req: FeedbackReq):
-    fb = {"feedback_id": req.feedback_id, "summary": req.summary}
-    # 自动触发研发 Agent：造工具 + 注册 + 沉淀 SOP（闭环自动化）
-    res = dev.fulfill_feedback(fb)
-    _reload()
-    _save_trace("api_feedback", {"feedback": fb, "result": res})
-    return {
-        "feedback": fb,
-        "created_tool": res["tool"],
-        "sop": res["sop"],
-        "note": "已自动注册工具并沉淀 SOP，可在 /tools 与 /knowledge 查看",
-    }
-
-
-@app.post("/closed-loop/run")
-def closed_loop(req: ClosedLoopReq):
-    job_id = _start_job(lambda: _closed_loop_flow(req))
-    return {"job_id": job_id, "status": "running"}
 
 
 def _closed_loop_flow(req: ClosedLoopReq):
@@ -909,183 +838,7 @@ def _stream_make_processor(ws_id, ops_id, mode, route_by_alert=True):
     return process
 
 
-@app.post("/stream/start")
-def stream_start(req: StreamStartReq, request: Request):
-    """启动模拟告警流水线：自动循环播放剧本，Agent 持续处置不停摆。
-
-    v0.8.18：流水线按业务域隔离——req.workspace_id 决定启动哪条流，
-    且要求当前用户对该域有写权限（公共域仅 admin、私有域仅 owner、匿名 403），
-    与 Agent 增删改同一套多租户规则。启动者用户名记入 status 供前端展示。
-    """
-    # 域存在性 + 写权限：看不见的域直接 404（不暴露存在），看得见但没写权 403
-    if req.workspace_id and not ws_store.is_visible_to(
-            req.workspace_id, getattr(request.state, "user", None)):
-        raise HTTPException(status_code=404, detail="业务域不存在")
-    user = getattr(request.state, "user", None)
-    if req.workspace_id and not ws_store.is_writable_by(req.workspace_id, user):
-        _audit_write(request, "stream.start", req.workspace_id,
-                     {"profile": req.profile, "mode": req.mode}, result="denied")
-        raise HTTPException(
-            status_code=403,
-            detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
-    stream = _stream_of(req.workspace_id)
-    if req.profile not in ("mixed", "story"):
-        raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
-    if req.mode and req.mode not in ("auto", "manual"):
-        raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
-    data = load_alerts()
-    playlist = build_playlist(data.get("alerts", []), profile=req.profile)
-    if not playlist:
-        raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
-    ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
-    # 临界区：把「已在运行检查 + 启动」做成原子，避免并发 stream_start 的 TOCTOU
-    # 竞态导致同一域重复派发流水线（SSE 幂等）。
-    with _stream_op_lock:
-        if stream.running:
-            started_by = stream.status().get("started_by") or "其他人"
-            _audit_write(request, "stream.start", req.workspace_id,
-                         {"profile": req.profile, "already_by": started_by}, result="denied")
-            raise HTTPException(
-                status_code=409,
-                detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
-                       "请先停止再启动")
-        stream._process = _stream_make_processor(req.workspace_id, ops_id, mode,
-                                              route_by_alert=req.ops_agent_id is None)
-        started_by = (user or {}).get("username") or "匿名"
-        stream.start(playlist, profile=req.profile,
-                     interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
-                     started_by=started_by)
-    _audit_write(request, "stream.start", req.workspace_id,
-                 {"profile": req.profile, "mode": mode, "ops_agent_id": ops_id})
-    return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
-            "mode": mode, "playlist_len": len(playlist),
-            "workspace_id": req.workspace_id,
-            "started_by": started_by, "detail": stream.status()}
-
-
-@app.post("/stream/stop")
-def stream_stop(request: Request, workspace_id: Optional[str] = None):
-    """停止流水线（幂等），返回最终统计。
-
-    v0.8.18：按 workspace_id 停对应域的流（不传则停全局槽位）；写权限同启动，
-    保证「谁的地盘谁能停」，admin 可停任何域（管理需要）。
-    """
-    if workspace_id and not ws_store.is_visible_to(
-            workspace_id, getattr(request.state, "user", None)):
-        raise HTTPException(status_code=404, detail="业务域不存在")
-    if workspace_id and not ws_store.is_writable_by(
-            workspace_id, getattr(request.state, "user", None)):
-        _audit_write(request, "stream.stop", workspace_id, {}, result="denied")
-        raise HTTPException(status_code=403, detail="无权停止该业务域的告警流水线")
-    stream = _stream_of(workspace_id)
-    was_running = stream.running
-    stream.stop()
-    if was_running:
-        _audit_write(request, "stream.stop", workspace_id,
-                     {"rounds": stream.status().get("rounds", 0)})
-    return {"status": "stopped", "detail": stream.status()}
-
-
-@app.post("/stream/reset-demo")
-def stream_reset_demo(request: Request):
-    """重置演示数据：清掉流内沉淀的工具，让「缺工具→造工具」可反复重演。
-
-    只删除「全局工具库」里非内置（保留 ping_host / restart_service）的工具行，
-    不动各业务域自有工具与消息栏历史。
-    v0.8.18：清的是全局工具库 → 收紧为管理员专用，且先停掉所有域的流水线
-    （避免边跑边清造成处置报错刷屏）。
-    """
-    user = getattr(request.state, "user", None)
-    if not (user or {}).get("is_admin"):
-        _audit_write(request, "demo.reset", None, {}, result="denied")
-        raise HTTPException(status_code=403, detail="重置演示数据仅管理员可用")
-    with _streams_lock:
-        running = {k: s for k, s in _streams.items() if s.running}
-    for s in running.values():
-        s.stop()
-    db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
-               "AND (workspace_id IS NULL OR workspace_id='')")
-    # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
-    db.execute("DELETE FROM requirements")
-    _audit_write(request, "demo.reset", None,
-                 {"stopped_streams": list(running.keys())})
-    return {"status": "reset", "stopped_streams": list(running.keys()),
-            "tools": [r["name"] for r in db.query(
-                "SELECT name FROM tools ORDER BY name")]}
-
-
-@app.get("/stream/status")
-def stream_status(request: Request, workspace_id: Optional[str] = None):
-    """流水线运行状态 + 累计统计（前端秒级轮询）。
-
-    v0.8.18：按 workspace_id 查对应域的流；越权查看他人域 → 404（不暴露存在）。
-    """
-    if not _stream_key_visible(workspace_id, request):
-        raise HTTPException(status_code=404, detail="业务域不存在")
-    return _stream_of(workspace_id).status()
-
-
-@app.get("/stream/feed")
-def stream_feed(after: int = 0, request: Request = None,
-                workspace_id: Optional[str] = None):
-    """增量拉取处置流水（seq > after），供前端像监控大屏一样滚动渲染。"""
-    if not _stream_key_visible(workspace_id, request):
-        raise HTTPException(status_code=404, detail="业务域不存在")
-    return {"items": _stream_of(workspace_id).feed(after=after)}
-
-
-@app.get("/stream/tasks")
-def stream_tasks(limit: int = 50, agent_id: Optional[str] = None,
-                 request: Request = None, workspace_id: Optional[str] = None):
-    """作战室任务队列：把流水线告警按「分配运维 Agent → 处置 → 闭环」可视化。
-
-    可选 agent_id 过滤只看某 Agent 的任务；limit 控制返回最近 N 条。
-    """
-    if not _stream_key_visible(workspace_id, request):
-        raise HTTPException(status_code=404, detail="业务域不存在")
-    items = _stream_of(workspace_id).tasks(limit=limit)
-    if agent_id:
-        items = [t for t in items if t.get("assigned_agent") == agent_id]
-    return {"tasks": items, "running": _stream_of(workspace_id).running}
-
-
 # ---------------- 多 Agent 矩阵 + 消息栏（人工 / 自动派发闭环） ----------------
-@app.get("/agents")
-def agents(workspace_id: Optional[str] = None, request: Request = None):
-    """返回 Agent 列表（含实时 status：idle/busy/error）。传 workspace_id 可按业务域过滤。
-
-    多租户隔离：仅返回当前登录用户「可见业务域」下的 Agent（公共域 + 本人私有域）；
-    未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。
-    """
-    user = getattr(request.state, "user", None) if request else None
-    visible = set(ws_store.visible_workspace_ids(user=user))
-    items = registry.list(workspace_id=workspace_id)
-    items = [a for a in items if a.get("workspace_id") in visible]
-    return {
-        "agents": items,
-        "primary_ops": registry.primary("ops", workspace_id) if workspace_id else None,
-        "primary_dev": registry.primary("dev", workspace_id) if workspace_id else None,
-    }
-
-
-@app.get("/dispatch/mode")
-def get_mode():
-    return {"mode": dispatch_mode["value"]}
-
-
-@app.post("/dispatch/mode")
-def set_mode(req: ModeReq):
-    if req.mode not in ("auto", "manual"):
-        raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
-    dispatch_mode["value"] = req.mode
-    return {"mode": req.mode}
-
-
-@app.get("/requirements")
-def get_requirements(status: Optional[str] = None, workspace_id: Optional[str] = None):
-    return {"requirements": board.list(status, workspace_id)}
-
-
 def _resolve_alert_obj(req_alert, req_alert_id):
     if req_alert:
         return req_alert
@@ -1101,21 +854,6 @@ def _resolve_alert_obj(req_alert, req_alert_id):
         "value": "88C", "message": "物理机 host-1 核心温度过热告警，疑似散热故障",
         "tags": ["compute", "temperature"], "is_noise": False,
     }
-
-
-@app.post("/requirements/raise")
-def post_requirement(req: RaiseReq):
-    """运维 Agent 诊断后把"工具缺口"登记进消息栏；自动模式下直接跑完闭环。"""
-    ws_id = req.workspace_id
-    ops_id = req.ops_agent_id or _ws_primary_ops(ws_id)
-    ops_inst = registry.get_instance(ops_id)
-    if not ops_inst:
-        raise HTTPException(status_code=400, detail=f"ops agent {ops_id} 不存在")
-    alert_obj = _resolve_alert_obj(req.alert, req.alert_id)
-    # 业务域存在则用域内模式；否则退回全局模式（避免 None["mode"] 抛 500）
-    mode = ws_store.get(ws_id)["mode"] if (ws_id and ws_store.get(ws_id)) else dispatch_mode["value"]
-    job_id = _start_job(lambda: _raise_flow(ops_id, alert_obj, mode, ws_id))
-    return {"job_id": job_id, "status": "running"}
 
 
 def _raise_flow(ops_id, alert_obj, mode, ws_id, out=None):
@@ -1145,51 +883,7 @@ def _raise_flow(ops_id, alert_obj, mode, ws_id, out=None):
         registry.set_status(ops_id, "idle")
 
 
-@app.post("/requirements/{req_id}/dispatch-dev")
-def post_dispatch_dev(req_id: str, req: DispatchReq):
-    """手动模式：把需求派发给指定（或路由选中）的研发 Agent 造工具。"""
-    def _flow():
-        res = dispatch_mod.dispatch_to_dev(
-            board, registry, req_id, dev_agent_id=req.agent_id, mode=req.mode)
-        # 造完工具刷新工具库/知识库视图，运维侧立即可复用（含 SOP 检索）
-        _reload_all()
-        return res
-    job_id = _start_job(_flow)
-    return {"job_id": job_id, "status": "running"}
-
-
-@app.post("/requirements/{req_id}/dispatch-ops")
-def post_dispatch_ops(req_id: str, req: DispatchReq):
-    """手动模式：工具造好后，派回指定（或发起方）运维 Agent 重新处置。"""
-    job_id = _start_job(lambda: dispatch_mod.dispatch_to_ops(
-        board, registry, req_id, ops_agent_id=req.agent_id, mode=req.mode))
-    return {"job_id": job_id, "status": "running"}
-
-
 # ---------------- 单个 Agent 工作台（作战室卡片点击进入） ----------------
-@app.post("/agents/{agent_id}/diagnose")
-def agent_diagnose(agent_id: str, req: AlertReq):
-    """运维 Agent 工作台：运行该 Agent 的告警根因分析（job 化，状态灯实时联动）。"""
-    a = registry.get(agent_id)
-    if not a:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} 不存在")
-    if a["kind"] != "ops":
-        raise HTTPException(status_code=400, detail=f"{agent_id} 不是运维 Agent")
-    inst = registry.get_instance(agent_id)
-
-    def flow():
-        alert_obj = _resolve_alert_obj(req.alert, req.alert_id)
-        registry.set_status(agent_id, "busy")
-        try:
-            return inst.handle_alert(alert_obj)
-        finally:
-            registry.set_status(agent_id, "idle")
-
-    job_id = _start_job(flow)
-    return {"job_id": job_id, "status": "running"}
-
-
-@app.post("/agents/{agent_id}/build")
 def _run_agent_build(agent_id: str, feedback: Dict[str, Any]) -> Dict[str, Any]:
     """实际执行研发造工具流程（被 job 与审批批准共用）。"""
     a = registry.get(agent_id)
@@ -1246,190 +940,9 @@ def agent_build(agent_id: str, req: FeedbackReq, request: Request):
     return {"job_id": job_id, "status": "running"}
 
 
-@app.post("/agents/{agent_id}/register-gap")
-def agent_register_gap(agent_id: str, req: GapRegisterReq):
-    """工作台诊断出工具缺口后，把缺口登记进当前业务域消息栏并按模式派发（打通工作台→闭环）。
-
-    前端在 /agents/{id}/diagnose 跑出 missing_tool 后，带诊断结果回传本接口，
-    避免重复推理；登记的需求归属该 Agent 所在业务域，自动模式即跑完研发→回传闭环。
-    """
-    a = registry.get(agent_id)
-    if not a:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} 不存在")
-    if a["kind"] != "ops":
-        raise HTTPException(status_code=400, detail=f"{agent_id} 不是运维 Agent")
-    if not req.missing_tool:
-        raise HTTPException(status_code=400, detail="无工具缺口，无需登记")
-    ws_id = a.get("workspace_id")
-    alert_obj = _resolve_alert_obj(req.alert, req.alert_id)
-    mode = req.mode or (ws_store.get(ws_id)["mode"] if (ws_id and ws_store.get(ws_id))
-                        else dispatch_mode["value"])
-    out = {"missing_tool": req.missing_tool, "diagnosis": req.diagnosis or {}}
-    job_id = _start_job(lambda: _raise_flow(agent_id, alert_obj, mode, ws_id, out=out))
-    return {"job_id": job_id, "status": "running"}
-
-
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------
 # ---------------- 业务域 / 工作空间（持久化） ----------------
-@app.get("/workspaces")
-def list_workspaces(request: Request):
-    """列出当前登录用户可见的业务域（公共域 + 本人私有域）。多租户隔离。
-    未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。"""
-    user = getattr(request.state, "user", None)
-    wss = ws_store.list(user=user)
-    # 附带各业务域「待处理需求数」（未闭环、未驳回），供作战室悬浮卡展示
-    for w in wss:
-        w["pending"] = len([
-            r for r in board.list(workspace_id=w["id"])
-            if r.get("status") not in ("done", "rejected")
-        ])
-    return {"workspaces": wss}
-
-
 # ---------------- 业务域操作记录（工作台产出写回消息栏） ----------------
-@app.get("/workspaces/{ws_id}/messages")
-def get_messages(ws_id: str, limit: int = 50):
-    """按业务域拉取操作记录（最新在前），供消息栏「操作记录」tab 展示。"""
-    rows = db.query(
-        "SELECT * FROM messages WHERE workspace_id=? ORDER BY ts DESC LIMIT ?", (ws_id, limit))
-    return {"messages": [dict(r) for r in rows]}
-
-
-@app.post("/workspaces/{ws_id}/messages")
-def post_message(ws_id: str, req: MessageReq):
-    """写入一条操作记录（diagnose/build/gap）。受 Token 鉴权保护。"""
-    ws = ws_store.get(ws_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail=f"业务域 {ws_id} 不存在")
-    agent_name = ""
-    a = next((x for x in ws.get("agents", []) if x["id"] == req.agent_id), None)
-    if a:
-        agent_name = a["name"]
-    entry = {
-        "id": "M-" + uuid.uuid4().hex[:6],
-        "workspace_id": ws_id,
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "agent_id": req.agent_id,
-        "agent_name": agent_name,
-        "kind": req.kind,
-        "summary": req.summary,
-        "detail": req.detail,
-    }
-    _save_message(entry)
-    return entry
-
-
-@app.post("/workspaces")
-def create_workspace(req: CreateWorkspaceReq, request: Request):
-    if req.mode not in ("auto", "manual"):
-        raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
-    # 记录创建者（JWT 登录用户）与归属组织，便于后续组织树 + RBAC 隔离
-    owner_id = None
-    user = getattr(request.state, "user", None)
-    if user and user.get("uid"):
-        owner_id = user["uid"]
-    org_id = user.get("org_id") if user else None
-    try:
-        ws = ws_store.create(req.name, req.adapter_id, req.mode, req.custom_id,
-                            owner_id=owner_id, org_id=org_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _audit_write(request, "workspace.create", ws["id"],
-                 {"name": req.name, "mode": req.mode, "owner_id": owner_id})
-    return ws
-
-
-@app.get("/workspaces/{ws_id}")
-def get_workspace(ws_id: str, request: Request):
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_visible_to(ws_id, user):
-        raise HTTPException(status_code=404, detail=f"业务域 {ws_id} 不存在")
-    ws = ws_store.get(ws_id)
-    if not ws:
-        raise HTTPException(status_code=404, detail=f"业务域 {ws_id} 不存在")
-    return ws
-
-
-@app.put("/workspaces/{ws_id}/mode")
-def set_workspace_mode(ws_id: str, req: ModeReq, request: Request):
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_writable_by(ws_id, user):
-        _audit_write(request, "workspace.mode", ws_id, {"mode": req.mode},
-                     result="denied")
-        raise HTTPException(status_code=403, detail="无权修改该业务域")
-    if not ws_store.update_mode(ws_id, req.mode):
-        raise HTTPException(status_code=400, detail="业务域不存在或 mode 非法")
-    _audit_write(request, "workspace.mode", ws_id, {"mode": req.mode})
-    return {"id": ws_id, "mode": req.mode}
-
-
-@app.post("/workspaces/{ws_id}/agents")
-def create_agent(ws_id: str, req: CreateAgentReq, request: Request):
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_writable_by(ws_id, user):
-        _audit_write(request, "agent.create", ws_id, {"name": req.name, "kind": req.kind},
-                     result="denied")
-        raise HTTPException(status_code=403, detail="无权在该业务域下创建 Agent")
-    try:
-        agent = ws_store.add_agent(ws_id, req.kind, req.name, req.scope, req.description, req.primary)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _audit_write(request, "agent.create", ws_id,
-                 {"agent": agent["id"], "name": req.name, "kind": req.kind})
-    return agent
-
-
-@app.put("/workspaces/{ws_id}/agents/{agent_id}")
-def update_agent(ws_id: str, agent_id: str, req: UpdateAgentReq, request: Request):
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_writable_by(ws_id, user):
-        _audit_write(request, "agent.update", ws_id, {"agent": agent_id},
-                     result="denied")
-        raise HTTPException(status_code=403, detail="无权修改该业务域下的 Agent")
-    if req.name:
-        if not ws_store.rename_agent(ws_id, agent_id, req.name):
-            raise HTTPException(status_code=404, detail="Agent 不存在")
-    if req.scope is not None or req.description is not None:
-        if not ws_store.update_agent(ws_id, agent_id, req.scope, req.description):
-            raise HTTPException(status_code=404, detail="Agent 不存在")
-    _audit_write(request, "agent.update", ws_id,
-                 {"agent": agent_id, "name": req.name,
-                  "scope": req.scope, "description": req.description})
-    return ws_store.get(ws_id)
-
-
-@app.delete("/workspaces/{ws_id}")
-def delete_workspace(ws_id: str, request: Request):
-    """删除业务域（默认域受保护），并级联清理其下所有 Agent 实例。"""
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_writable_by(ws_id, user):
-        _audit_write(request, "workspace.delete", ws_id, {}, result="denied")
-        raise HTTPException(status_code=403, detail="无权删除该业务域")
-    try:
-        ok, msg = ws_store.delete_workspace(ws_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    _audit_write(request, "workspace.delete", ws_id, {"msg": msg})
-    return {"deleted": ws_id}
-
-
-@app.delete("/workspaces/{ws_id}/agents/{agent_id}")
-def delete_agent(ws_id: str, agent_id: str, request: Request):
-    user = getattr(request.state, "user", None)
-    if not ws_store.is_writable_by(ws_id, user):
-        _audit_write(request, "agent.delete", ws_id, {"agent": agent_id},
-                     result="denied")
-        raise HTTPException(status_code=403, detail="无权删除该业务域下的 Agent")
-    ok, msg = ws_store.delete_agent(ws_id, agent_id)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    _audit_write(request, "agent.delete", ws_id, {"agent": agent_id})
-    return {"deleted": agent_id, "workspace": ws_id}
-
-
-
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------
 @app.get("/adapters")
 def list_adapters(adapter_type: Optional[str] = None):
@@ -1685,6 +1198,55 @@ ctx._mask_llm_cfg = _mask_llm_cfg
 ctx._provider_console_url = _provider_console_url
 ctx.ToolCallReq = ToolCallReq
 ctx._gc_jobs = _gc_jobs
+# R2：抽出 alerts/stream/agents/workspaces 4 组后，补齐它们依赖的共享对象
+ctx.ops = ops
+ctx.dev = dev
+ctx.ops_graph = ops_graph
+ctx.board = board
+ctx.db = db
+ctx.dispatch_mod = dispatch_mod
+ctx.REQUIRE_APPROVAL = REQUIRE_APPROVAL
+ctx.approvals = approvals
+ctx._streams = _streams
+ctx._streams_lock = _streams_lock
+ctx._stream_op_lock = _stream_op_lock
+ctx.LLM_SEM = LLM_SEM
+ctx.load_alerts = load_alerts
+ctx.build_playlist = build_playlist
+ctx._start_job = _start_job
+ctx._alert_flow = _alert_flow
+ctx._closed_loop_flow = _closed_loop_flow
+ctx._save_trace = _save_trace
+ctx._reload = _reload
+ctx._ws_primary_ops = _ws_primary_ops
+ctx._stream_of = _stream_of
+ctx._stream_resolve_ctx = _stream_resolve_ctx
+ctx._stream_make_processor = _stream_make_processor
+ctx._stream_key_visible = _stream_key_visible
+ctx._audit_write = _audit_write
+ctx._resolve_alert_obj = _resolve_alert_obj
+ctx._raise_flow = _raise_flow
+ctx._reload_all = _reload_all
+ctx._actor_of = _actor_of
+ctx._run_agent_build = _run_agent_build
+ctx._audit_write_dummy = _audit_write_dummy
+ctx._save_message = _save_message
+ctx._agent_sem = _agent_sem
+ctx._client_ip = _client_ip
+# R2 抽出的 router 用作类型标注 / 别名的请求模型
+ctx.AlertReq = AlertReq
+ctx.ChatReq = ChatReq
+ctx.FeedbackReq = FeedbackReq
+ctx.ClosedLoopReq = ClosedLoopReq
+ctx.StreamStartReq = StreamStartReq
+ctx.ModeReq = ModeReq
+ctx.RaiseReq = RaiseReq
+ctx.DispatchReq = DispatchReq
+ctx.GapRegisterReq = GapRegisterReq
+ctx.MessageReq = MessageReq
+ctx.CreateWorkspaceReq = CreateWorkspaceReq
+ctx.CreateAgentReq = CreateAgentReq
+ctx.UpdateAgentReq = UpdateAgentReq
 
 from src.api.routers import (
     system_router,
@@ -1692,12 +1254,20 @@ from src.api.routers import (
     traces_router,
     llm_router,
     audit_router,
+    alerts_router,
+    stream_router,
+    agents_router,
+    workspaces_router,
 )
 app.include_router(system_router)
 app.include_router(core_router)
 app.include_router(traces_router)
 app.include_router(llm_router)
 app.include_router(audit_router)
+app.include_router(alerts_router)
+app.include_router(stream_router)
+app.include_router(agents_router)
+app.include_router(workspaces_router)
 
 
 # ---------------- 静态前端：单端口同时提供 API 与界面 ----------------
