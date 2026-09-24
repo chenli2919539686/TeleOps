@@ -64,6 +64,7 @@ from src.agents.ops_agent import OpsAgent
 from src.agents.dev_agent import DevAgent
 from src.core.agent_runtime import AgentRuntime
 from src.core.state_store import get_job_store
+from src.core.semaphore import get_semaphore_store
 from src.core.stream_state import get_stream_state_store
 from src.core.stream_executor import get_stream_executor
 from src.workers import stream_tasks
@@ -73,7 +74,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.33"
+VERSION = "0.8.34"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -326,20 +327,21 @@ _STREAM_GLOBAL_KEY = "__global__"   # 兼容旧调用（不传 workspace_id）�
 
 
 _LLM_MAX = int(os.environ.get("TELEOPS_LLM_CONCURRENCY", "4"))
-LLM_SEM = threading.Semaphore(_LLM_MAX)
-_AGENT_SEM_LOCK = threading.Lock()
-_AGENT_SEMS = {}
 _AGENT_MAX = int(os.environ.get("TELEOPS_AGENT_CONCURRENCY", "2"))
+# D3 收官：并发闸门改走 semaphore 状态层（默认本地 threading.Semaphore，行为不变；
+# 设 TELEOPS_STATE_STORE=redis 后多副本共享同一份许可池 —— 否则 N 副本各限 4，
+# 实际对模型的并发是 4N，配额保护形同虚设）。
+semaphores = get_semaphore_store()
+
+
+def _llm_sem():
+    """全局 LLM 并发闸门：防多域/多流把模型配额打穿。"""
+    return semaphores.semaphore("llm", _LLM_MAX)
 
 
 def _agent_sem(aid):
-    """每 Agent 有界并发信号量（懒创建），防止单 Agent 被并发打爆。"""
-    with _AGENT_SEM_LOCK:
-        s = _AGENT_SEMS.get(aid)
-        if s is None:
-            s = threading.Semaphore(_AGENT_MAX)
-            _AGENT_SEMS[aid] = s
-        return s
+    """每 Agent 有界并发闸门，防止单 Agent 被并发打爆。"""
+    return semaphores.semaphore(f"agent:{aid}", _AGENT_MAX)
 
 
 def _stream_of(ws_id: Optional[str]) -> AlertStream:
@@ -785,7 +787,7 @@ def _stream_make_processor(ws_id, ops_id, mode, route_by_alert=True):
         try:
             # 并发隔离（改造 B）：全局 LLM 信号量防多域/多流踩 DeepSeek 配额，
             # 每 Agent 信号量防单 Agent 被并发打爆。任一 Agent 过载时在此排队而非阻塞进程。
-            with LLM_SEM, _agent_sem(aid):
+            with _llm_sem(), _agent_sem(aid):
                 out = inst.handle_alert(alert)
         except Exception as e:
             entry["error"] = f"{type(e).__name__}: {e}"
@@ -1226,7 +1228,7 @@ ctx.approvals = approvals
 ctx._streams = _streams
 ctx._streams_lock = _streams_lock
 ctx._stream_op_lock = _stream_op_lock
-ctx.LLM_SEM = LLM_SEM
+ctx.semaphores = semaphores
 ctx.load_alerts = load_alerts
 ctx.build_playlist = build_playlist
 ctx._start_job = _start_job
@@ -1262,7 +1264,7 @@ ctx._actor_of = _actor_of
 ctx._run_agent_build = _run_agent_build
 ctx._audit_write_dummy = _audit_write_dummy
 ctx._save_message = _save_message
-ctx._agent_sem = _agent_sem
+ctx._llm_sem = _llm_sem
 ctx._client_ip = _client_ip
 # R2 抽出的 router 用作类型标注 / 别名的请求模型
 ctx.AlertReq = AlertReq
