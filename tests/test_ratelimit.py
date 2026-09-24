@@ -94,3 +94,41 @@ def test_alert_ingest_rate_limited(client, auth_headers):
                     json=payload, headers=auth_headers)
     assert r.status_code == 429, f"第 4 次应被限流，实际 {r.status_code}（前 3 次: {seen}）"
     assert int(r.headers.get("Retry-After", "0")) >= 1
+
+
+def test_xff_isolates_clients(client):
+    """Phase 0：反代后取 X-Forwarded-For 真实 IP，不同出口 IP 不共用一个桶。
+
+    模拟 Caddy 反代：后端眼里直连 IP 全是 127.0.0.1，但 XFF 不同。
+    读档压到 1：IP-A 第一次放行、第二次 429；IP-B 因 XFF 不同仍各自有 1 次额度。
+    """
+    _open(read=1)
+    h_a = {"X-Forwarded-For": "10.0.0.1"}
+    h_b = {"X-Forwarded-For": "10.0.0.2"}
+    # IP-A 第一次：放行（不论业务层 200/401，关键是未 429）
+    assert client.get("/topology", headers=h_a).status_code != 429
+    # IP-B 第一次：独立桶，仍放行，不被 IP-A 占用
+    assert client.get("/topology", headers=h_b).status_code != 429
+    # IP-A 第二次：自身桶耗尽 → 429
+    assert client.get("/topology", headers=h_a).status_code == 429
+
+
+def _fake_bearer(sub: str) -> str:
+    """构造一个未验签的伪 JWT（中间件只取 sub 做分桶，不验证签名）。"""
+    import base64 as _b64
+    import json as _json
+    payload = _b64.urlsafe_b64encode(_json.dumps({"sub": sub}).encode()).decode()
+    return f"Bearer x.{payload}.y"
+
+
+def test_bearer_sub_isolates_users(client):
+    """Phase 0：已登录用户按 JWT sub 隔离限流桶，即便同一出口 IP 也不互相牵连。
+
+    读档压到 1：userA 第一次放行、第二次 429；userB 因 sub 不同仍各有 1 次额度。
+    """
+    _open(read=1)
+    ha = {"Authorization": _fake_bearer("userA")}
+    hb = {"Authorization": _fake_bearer("userB")}
+    assert client.get("/topology", headers=ha).status_code != 429
+    assert client.get("/topology", headers=hb).status_code != 429
+    assert client.get("/topology", headers=ha).status_code == 429

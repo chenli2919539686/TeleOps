@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/chenli2919539686/TeleOps/actions/workflows/ci.yml/badge.svg)](https://github.com/chenli2919539686/TeleOps/actions)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-138%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
+[![Tests](https://img.shields.io/badge/tests-140%20passed-brightgreen)](https://github.com/chenli2919539686/TeleOps/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > **仓库**：https://github.com/chenli2919539686/TeleOps
@@ -237,6 +237,13 @@ python app.py
 - **OIDC SSO**：`/auth/oidc/login` + `/auth/oidc/callback`（含 dev mock 可直接演示，真实 IdP 留 JWKS 钩子），与现有 JWT/邀请码并存；前端「🔑 SSO」。
 - **指标看板 + 审计回放**：`GET /metrics/summary` 返回量化指标 + 实时 Adapter 统计，前端「📊 指标看板」卡片；`/audit` 加 `since/until` 时间范围 + 前端「▶ 回放」按时间轴逐步高亮。
 - 新增 `docs/04-能力对照与优化路线.md`（功能设计 + GitHub 8 项目对比表 + P0/P1/P2 优化路线）。**全量 pytest 138 项全绿**（新增 4 项路由测试在外）。
+
+**v0.8.25 · 架构可演进性前置 + Phase 0 多用户解锁（限流/幂等）**
+- **D1 抽数据访问层（零行为变更）**：新增 `src/core/data_files.py` 统一收敛 `server.py` 内 7 处 `ALERTS_FILE`/`TOPOLOGY_FILE`/`eval_results` 内联直读；`db.py` 本就是干净 SQLite 统一出口无需动。为后续换信创库/Postgres 铺路——数据出口归一，迁移阻力最小。**全量 pytest 138 项仍绿**。
+- **Phase 0 限流修复（解锁多用户）**：限流中间件原取 `request.client.host`，经 Caddy 反代后全员 `127.0.0.1` → 共享一个桶，**2–3 人即全员 429**。改为 `_rl_key()` 按「已登录则 JWT sub / 否则真实客户端 IP（X-Forwarded-For 优先）」分桶——内网多人走同一出口 IP 也能按账号隔离，反代后每个真实 IP 各自有额度。
+- **Phase 0 SSE 幂等**：`stream_start` 的「已在运行检查 + 启动」原为 TOCTOU 竞态（并发请求可能都通过检查再各自启动，导致同一域重复派发流水线）。加 `_stream_op_lock` 把检查+启动包成原子。
+- 新增 `tests/test_ratelimit.py` 两项回归（XFF 真实 IP 隔离 / 按 sub 隔离）。**全量 pytest 140 项全绿**。
+- D2（拆 1900 行 server.py 单体）按既定决策走「演进式分轮」——待 Phase 1 加组织树/RBAC/审计时顺手按域拆 `routers/`，不在本版硬拆，对演示级 demo 零风险。
 
 **v0.8.24 · 调度架构：告警选对应 Agent + 并发隔离（不卡顿）**
 - **问题**：原 `_stream_make_processor` 把一条流里所有告警都喂同一个 `primary_ops` Agent 且同步调 LLM，多业务域并发抢同一 DeepSeek 配额 → 互相限流变慢（用户直观感受「多 Agent 却卡」）。

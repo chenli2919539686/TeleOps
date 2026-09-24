@@ -25,6 +25,7 @@ import time
 import threading
 import urllib.request
 import uuid
+import base64
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -44,6 +45,7 @@ from pydantic import BaseModel
 
 import src.config as _config_module
 from src.config import TOPOLOGY_FILE, ALERTS_FILE, TRACE_DIR, DATA_DIR, load_llm_config, save_llm_config
+from src.core.data_files import load_alerts, load_topology, load_eval_results
 from src.core.cmdb_graph import CMDBGraph
 from src.core.kb_store import KBStore
 from src.core.tool_registry import ToolRegistry
@@ -66,7 +68,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.24"
+VERSION = "0.8.25"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -164,8 +166,27 @@ _LOW_FREQ_PATHS = {"/", "/metrics", "/health", "/health/ready", "/api/info",
                    "/stream/status", "/stream/feed"}  # 演示流状态轮询不计读额度
 
 
+def _rl_key(request: Request, bucket: str) -> str:
+    """限流分桶 key：已登录用户按账号(sub)隔离；否则取真实客户端 IP（兼容 Caddy
+    反代 X-Forwarded-For，避免反代后全员共用 127.0.0.1 一个桶导致 2-3 人即全员 429）。
+    解析 Authorization 仅取 sub 做分桶、不验签，无安全决策依赖。"""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        try:
+            seg = auth.split(".", 2)[1]
+            payload = json.loads(base64.urlsafe_b64decode(seg + "=="))
+            sub = payload.get("sub")
+            if sub:
+                return f"{bucket}:u:{sub}"
+        except Exception:
+            pass
+    xff = request.headers.get("X-Forwarded-For")
+    ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else "unknown")
+    return f"{bucket}:{ip}"
+
+
 class _RateLimitMiddleware(BaseHTTPMiddleware):
-    """滑动窗口限流（按客户端 IP；分读/写/登录三档），防误用与口令爆破。"""
+    """滑动窗口限流（按账号 sub / 真实客户端 IP；分读/写/登录三档），防误用与口令爆破。"""
 
     async def dispatch(self, request, call_next):
         if not rl.ENABLED:
@@ -175,13 +196,15 @@ class _RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _LOW_FREQ_PATHS or path.startswith("/static") or \
                 path.split("?")[0].lower().endswith(_STATIC_SUFFIXES):
             return await call_next(request)
-        client = request.client.host if request.client else "unknown"
         if path in ("/auth/login", "/auth/register"):
-            limit, key = rl.LOGIN_LIMIT, f"login:{client}"
+            bucket = "login"
         elif request.method in ("POST", "PUT", "DELETE", "PATCH"):
-            limit, key = rl.WRITE_LIMIT, f"write:{client}"
+            bucket = "write"
         else:
-            limit, key = rl.READ_LIMIT, f"read:{client}"
+            bucket = "read"
+        key = _rl_key(request, bucket)
+        limit = {"login": rl.LOGIN_LIMIT, "write": rl.WRITE_LIMIT,
+                 "read": rl.READ_LIMIT}[bucket]
         ok, retry = rl.allow(key, limit)
         if not ok:
             # 顶层路径段做标签，基数有限（auth/workspaces/agents/...），防标签爆炸
@@ -371,6 +394,7 @@ adapters = AdapterRegistry()        # 外部系统适配器注册表（含预留
 # 解决「一台机器启动、所有人（含 admin）界面都跟着跑且停不下来」的全局单例问题。
 _streams: Dict[str, AlertStream] = {}
 _streams_lock = threading.Lock()
+_stream_op_lock = threading.Lock()   # 流水线启动/停止临界区，防并发重复派发（SSE 幂等）
 _STREAM_GLOBAL_KEY = "__global__"   # 兼容旧调用（不传 workspace_id）的全局槽位
 
 
@@ -815,7 +839,7 @@ def auth_logout(request: Request):
 
 @app.get("/topology")
 def topology():
-    return json.loads(Path(TOPOLOGY_FILE).read_text(encoding="utf-8"))
+    return load_topology()
 
 
 @app.get("/tools")
@@ -843,7 +867,7 @@ def list_alerts(severity: str = "", noise: str = "", q: str = "", limit: int = 2
 
     支持过滤：severity=info|critical、noise=true|false、q=关键字，供前端告警浏览器与调试使用。
     """
-    data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+    data = load_alerts()
     alerts = data.get("alerts", [])
     sev_cnt: dict = {}
     noise_cnt = 0
@@ -877,7 +901,7 @@ def alert(req: AlertReq):
 def _alert_flow(req: AlertReq):
     alert_obj = req.alert
     if alert_obj is None and req.alert_id:
-        data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+        data = load_alerts()
         matched = [a for a in data.get("alerts", []) if a.get("alert_id") == req.alert_id]
         if not matched:
             raise HTTPException(status_code=404, detail=f"alert_id {req.alert_id} 未找到")
@@ -936,7 +960,7 @@ def closed_loop(req: ClosedLoopReq):
 def _closed_loop_flow(req: ClosedLoopReq):
     alert_obj = req.alert
     if alert_obj is None and req.alert_id:
-        data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+        data = load_alerts()
         matched = [a for a in data.get("alerts", []) if a.get("alert_id") == req.alert_id]
         alert_obj = matched[0] if matched else None
     if alert_obj is None:
@@ -1129,29 +1153,32 @@ def stream_start(req: StreamStartReq, request: Request):
             status_code=403,
             detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
     stream = _stream_of(req.workspace_id)
-    if stream.running:
-        started_by = stream.status().get("started_by") or "其他人"
-        _audit_write(request, "stream.start", req.workspace_id,
-                     {"profile": req.profile, "already_by": started_by}, result="denied")
-        raise HTTPException(
-            status_code=409,
-            detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
-                   "请先停止再启动")
     if req.profile not in ("mixed", "story"):
         raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
     if req.mode and req.mode not in ("auto", "manual"):
         raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
-    data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+    data = load_alerts()
     playlist = build_playlist(data.get("alerts", []), profile=req.profile)
     if not playlist:
         raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
     ops_id, mode = _stream_resolve_ctx(req.workspace_id, req.ops_agent_id, req.mode)
-    stream._process = _stream_make_processor(req.workspace_id, ops_id, mode,
-                                          route_by_alert=req.ops_agent_id is None)
-    started_by = (user or {}).get("username") or "匿名"
-    stream.start(playlist, profile=req.profile,
-                 interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
-                 started_by=started_by)
+    # 临界区：把「已在运行检查 + 启动」做成原子，避免并发 stream_start 的 TOCTOU
+    # 竞态导致同一域重复派发流水线（SSE 幂等）。
+    with _stream_op_lock:
+        if stream.running:
+            started_by = stream.status().get("started_by") or "其他人"
+            _audit_write(request, "stream.start", req.workspace_id,
+                         {"profile": req.profile, "already_by": started_by}, result="denied")
+            raise HTTPException(
+                status_code=409,
+                detail=f"该业务域的告警流已在运行（由 {started_by} 启动），"
+                       "请先停止再启动")
+        stream._process = _stream_make_processor(req.workspace_id, ops_id, mode,
+                                              route_by_alert=req.ops_agent_id is None)
+        started_by = (user or {}).get("username") or "匿名"
+        stream.start(playlist, profile=req.profile,
+                     interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
+                     started_by=started_by)
     _audit_write(request, "stream.start", req.workspace_id,
                  {"profile": req.profile, "mode": mode, "ops_agent_id": ops_id})
     return {"status": "running", "profile": req.profile, "ops_agent_id": ops_id,
@@ -1288,7 +1315,7 @@ def _resolve_alert_obj(req_alert, req_alert_id):
     if req_alert:
         return req_alert
     if req_alert_id:
-        data = json.loads(Path(ALERTS_FILE).read_text(encoding="utf-8"))
+        data = load_alerts()
         matched = [a for a in data.get("alerts", []) if a.get("alert_id") == req_alert_id]
         if matched:
             return matched[0]
@@ -1819,13 +1846,7 @@ def metrics_summary(request: Request):
     diagnosis 段用离线标注数据验证；remediation 段用仿真靶机验证（明确标注 simulated）。
     实时部分附带当前告警流与适配器健康概况。
     """
-    eval_path = Path("data/eval_results.json")
-    eval_data = None
-    if eval_path.exists():
-        try:
-            eval_data = json.loads(eval_path.read_text(encoding="utf-8"))
-        except Exception:
-            eval_data = None
+    eval_data = load_eval_results("data/eval_results.json")
     with _streams_lock:
         running = {k: s.status() for k, s in _streams.items() if s.running}
     live = {
