@@ -92,8 +92,9 @@ def health():
         db_ok = True
     except Exception:
         pass
-    with s._jobs_lock:
-        jobs_running = sum(1 for v in s._jobs.values() if v["status"] == "running")
+    # D3：任务表已改成 JobStore（可能落在 Redis），遍历/加锁由存储自己负责，
+    # 这里只问"有几个在跑"，不要再直接碰底层字典与它的锁。
+    jobs_running = s._jobs.count_running()
     return {
         "status": "ok",
         "version": s.VERSION,

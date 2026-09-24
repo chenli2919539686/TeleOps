@@ -63,13 +63,14 @@ from src.llm_client import LLMClient
 from src.agents.ops_agent import OpsAgent
 from src.agents.dev_agent import DevAgent
 from src.core.agent_runtime import AgentRuntime
+from src.core.state_store import get_job_store
 from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.31"
+VERSION = "0.8.32"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -357,7 +358,12 @@ def _stream_key_visible(ws_id: Optional[str], request: Request) -> bool:
 
 
 # ---------------- 异步任务（让 Agent 运行时 busy 态可被前端实时轮询看到） ----------------
-_jobs: Dict[str, Any] = {}
+# 异步任务表：D3 起改走状态层（默认进程内 LocalJobStore，行为不变；
+# 设 TELEOPS_STATE_STORE=redis 后多副本共享任务状态 —— 否则 A 副本发起的任务
+# 轮询到 B 副本会查无此任务，状态灯永远转圈）。
+_jobs = get_job_store()
+# 注意：下面这把锁与"任务表"无关，是用来串行化 _reload/_reload_all 的互斥量
+# （沿用历史命名），不要因为看到 _jobs 前缀就当成任务表的锁。
 _jobs_lock = threading.Lock()
 _JOBS_MAX = 200          # 防止长时间运行内存泄漏：保留最近 200 个任务
 _JOBS_TTL = 3600         # 已完成任务 1 小时后清理
@@ -368,23 +374,22 @@ def _start_job(fn):
     前端可经 /jobs/{job_id} 轮询进度，作战室状态灯随之实时刷新。"""
     job_id = uuid.uuid4().hex[:8]
     metrics.inc("teleops_jobs_total")
-    with _jobs_lock:
-        _jobs[job_id] = {"status": "running", "result": None, "error": None, "ts": time.time()}
-        # 超过上限时清理最旧的任务
-        if len(_jobs) > _JOBS_MAX:
-            oldest = sorted(_jobs.keys(), key=lambda k: _jobs[k].get("ts", 0))[:len(_jobs) - _JOBS_MAX]
-            for k in oldest:
-                del _jobs[k]
+    _jobs.set(job_id, {"status": "running", "result": None, "error": None,
+                       "ts": time.time()})
+    _jobs.trim(_JOBS_MAX)          # 超过容量上限时清理最旧的
 
     def _run():
+        # 先取再改再写回：外部存储不像进程内字典支持原地改字段
+        job = _jobs.get(job_id) or {"status": "running", "result": None, "error": None}
         try:
-            _jobs[job_id]["result"] = fn()
-            _jobs[job_id]["status"] = "done"
+            job["result"] = fn()
+            job["status"] = "done"
         except Exception as e:
-            _jobs[job_id]["status"] = "error"
-            _jobs[job_id]["error"] = str(e)
+            job["status"] = "error"
+            job["error"] = str(e)
         finally:
-            _jobs[job_id]["ts"] = time.time()
+            job["ts"] = time.time()
+            _jobs.set(job_id, job)
 
     threading.Thread(target=_run, daemon=True).start()
     return job_id
@@ -392,12 +397,7 @@ def _start_job(fn):
 
 def _gc_jobs():
     """清理已结束且超过 TTL 的任务，避免内存无限增长。"""
-    now = time.time()
-    with _jobs_lock:
-        expired = [k for k, v in _jobs.items()
-                   if v["status"] in ("done", "error") and now - v.get("ts", 0) > _JOBS_TTL]
-        for k in expired:
-            del _jobs[k]
+    _jobs.prune_expired(_JOBS_TTL)
 
 
 def _ws_primary_ops(ws_id):
@@ -1201,7 +1201,6 @@ ctx.tools = tools
 ctx.adapters = adapters
 ctx.dispatch_mode = dispatch_mode
 ctx._jobs = _jobs
-ctx._jobs_lock = _jobs_lock
 ctx._config_module = _config_module
 ctx.LLM_PROVIDER_PRESETS = LLM_PROVIDER_PRESETS
 ctx.LLMConfig = LLMConfig

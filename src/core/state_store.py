@@ -30,6 +30,7 @@ Redis 不可用时默认**快速失败开放**（放行并记录告警），避�
 from __future__ import annotations
 
 import os
+import json
 import threading
 import time
 import uuid
@@ -195,3 +196,193 @@ def configure_state_store(store: Optional[StateStore]) -> None:
     global _store
     with _store_lock:
         _store = store
+
+
+# ---------------------------------------------------------------------------
+# 异步任务状态（_jobs）
+# ---------------------------------------------------------------------------
+# 与上面的滑动窗口是两类不同的状态，因此单开一个接口：任务需要"按 key 存/取/遍历/
+# 裁剪/过期清理"，而不是计数。做多副本时同样需要共享 —— 否则在 A 副本发起的任务，
+# 前端轮询到 B 副本会查无此任务（状态灯永远转圈）。
+
+
+class JobStore(ABC):
+    """异步任务状态的存储接口（dict 语义 + 容量/TTL 治理）。"""
+
+    @abstractmethod
+    def get(self, key: str, default=None):
+        ...
+
+    @abstractmethod
+    def set(self, key: str, value: dict) -> None:
+        ...
+
+    @abstractmethod
+    def delete(self, key: str) -> None:
+        ...
+
+    @abstractmethod
+    def values(self) -> list:
+        """返回全部任务 dict（用于统计 running 数）。"""
+
+    def count_running(self) -> int:
+        return sum(1 for v in self.values() if v.get("status") == "running")
+
+    @abstractmethod
+    def trim(self, max_keep: int) -> None:
+        """超过容量时删除最旧的（按 ts 升序）。"""
+
+    @abstractmethod
+    def prune_expired(self, ttl: float) -> None:
+        """删除已结束（done/error）且超过 TTL 的任务。"""
+
+
+class LocalJobStore(JobStore):
+    """进程内任务表（默认）：直接存原生对象，与改造前完全一致。"""
+
+    def __init__(self):
+        self._d = {}
+        self._lock = threading.Lock()
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._d.get(key, default)
+
+    def set(self, key, value):
+        with self._lock:
+            self._d[key] = value
+
+    def delete(self, key):
+        with self._lock:
+            self._d.pop(key, None)
+
+    def values(self):
+        with self._lock:
+            return list(self._d.values())
+
+    def trim(self, max_keep):
+        with self._lock:
+            if len(self._d) <= max_keep:
+                return
+            oldest = sorted(self._d.keys(),
+                            key=lambda k: self._d[k].get("ts", 0))[:len(self._d) - max_keep]
+            for k in oldest:
+                del self._d[k]
+
+    def prune_expired(self, ttl):
+        now = time.time()
+        with self._lock:
+            expired = [k for k, v in self._d.items()
+                       if v.get("status") in ("done", "error")
+                       and now - v.get("ts", 0) > ttl]
+            for k in expired:
+                del self._d[k]
+
+
+class RedisJobStore(JobStore):
+    """Redis 版任务表（每个任务一个 JSON 字符串 key），供多副本共享任务状态。"""
+
+    def __init__(self, redis_url: Optional[str] = None, client=None,
+                 key_prefix: str = "teleops:job:", ttl: float = 3600.0):
+        self._prefix = key_prefix
+        self._ttl = ttl
+        self._client = client
+        if self._client is None:
+            import redis  # 延迟导入：只有选用 redis 后端才依赖该包
+            self._client = redis.Redis.from_url(
+                redis_url or os.environ.get("TELEOPS_REDIS_URL",
+                                            "redis://127.0.0.1:6379/0"),
+                decode_responses=True)
+
+    def _k(self, key):
+        return f"{self._prefix}{key}"
+
+    @staticmethod
+    def _dump(v):
+        # default=str：任务结果里可能夹带非 JSON 原生对象，退化成字符串也不能写失败
+        return json.dumps(v, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _load(raw):
+        return json.loads(raw) if raw else None
+
+    def get(self, key, default=None):
+        raw = self._client.get(self._k(key))
+        if raw is None:
+            return default
+        try:
+            return self._load(raw)
+        except Exception:
+            return default
+
+    def set(self, key, value):
+        self._client.set(self._k(key), self._dump(value), ex=int(self._ttl))
+
+    def delete(self, key):
+        self._client.delete(self._k(key))
+
+    def values(self):
+        out = []
+        for k in self._client.scan_iter(match=f"{self._prefix}*", count=500):
+            raw = self._client.get(k)
+            if raw is None:
+                continue
+            try:
+                out.append(self._load(raw))
+            except Exception:
+                continue
+        return out
+
+    def trim(self, max_keep):
+        items = []
+        for k in self._client.scan_iter(match=f"{self._prefix}*", count=500):
+            raw = self._client.get(k)
+            if raw is None:
+                continue
+            try:
+                items.append((k, self._load(raw)))
+            except Exception:
+                continue
+        if len(items) <= max_keep:
+            return
+        items.sort(key=lambda kv: (kv[1] or {}).get("ts", 0))
+        for k, _ in items[:len(items) - max_keep]:
+            self._client.delete(k)
+
+    def prune_expired(self, ttl):
+        now = time.time()
+        for k in self._client.scan_iter(match=f"{self._prefix}*", count=500):
+            raw = self._client.get(k)
+            if raw is None:
+                continue
+            try:
+                v = self._load(raw)
+            except Exception:
+                self._client.delete(k)
+                continue
+            if v.get("status") in ("done", "error") and now - v.get("ts", 0) > ttl:
+                self._client.delete(k)
+
+
+_job_store: Optional[JobStore] = None
+_job_store_lock = threading.Lock()
+
+
+def get_job_store() -> JobStore:
+    """按环境变量返回任务状态后端（与滑动窗口共用同一开关，避免配置分裂）。"""
+    global _job_store
+    if _job_store is not None:
+        return _job_store
+    with _job_store_lock:
+        if _job_store is not None:
+            return _job_store
+        backend = os.environ.get("TELEOPS_STATE_STORE", "local").strip().lower()
+        _job_store = RedisJobStore() if backend == "redis" else LocalJobStore()
+        return _job_store
+
+
+def configure_job_store(store: Optional[JobStore]) -> None:
+    """显式指定任务状态后端（测试用）；None 则按环境变量重建。"""
+    global _job_store
+    with _job_store_lock:
+        _job_store = store

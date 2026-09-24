@@ -134,3 +134,94 @@ def test_rate_limit_delegates_to_store(monkeypatch):
     rl.reset("delegated")
     assert rl.allow("delegated", 1, 60.0)[0] is True
     ss.configure_state_store(None)
+
+
+# ---------------- JobStore（异步任务状态） ----------------
+@pytest.fixture()
+def local_jobs():
+    return ss.LocalJobStore()
+
+
+@pytest.fixture()
+def redis_jobs():
+    return ss.RedisJobStore(client=_fake_redis())
+
+
+def test_jobstore_roundtrip(local_jobs):
+    local_jobs.set("j1", {"status": "running", "result": None, "ts": time.time()})
+    assert local_jobs.get("j1")["status"] == "running"
+    assert local_jobs.get("nope") is None
+    assert local_jobs.get("nope", {"status": "not_found"})["status"] == "not_found"
+    local_jobs.delete("j1")
+    assert local_jobs.get("j1") is None
+
+
+def test_jobstore_count_running(local_jobs):
+    now = time.time()
+    local_jobs.set("a", {"status": "running", "ts": now})
+    local_jobs.set("b", {"status": "done", "ts": now})
+    local_jobs.set("c", {"status": "running", "ts": now})
+    assert local_jobs.count_running() == 2
+
+
+def test_jobstore_trim_keeps_newest(local_jobs):
+    base = time.time()
+    for i in range(5):
+        local_jobs.set(f"j{i}", {"status": "done", "ts": base + i})
+    local_jobs.trim(2)
+    assert len(local_jobs.values()) == 2
+    assert {v["ts"] for v in local_jobs.values()} == {base + 3, base + 4}
+
+
+def test_jobstore_prune_expired_only_finished(local_jobs):
+    now = time.time()
+    local_jobs.set("old_done", {"status": "done", "ts": now - 7200})
+    local_jobs.set("old_run", {"status": "running", "ts": now - 7200})
+    local_jobs.set("new_done", {"status": "done", "ts": now})
+    local_jobs.prune_expired(3600)
+    assert local_jobs.get("old_done") is None, "已结束且超 TTL 应被清理"
+    assert local_jobs.get("old_run") is not None, "仍在跑的任务不能被清掉"
+    assert local_jobs.get("new_done") is not None
+
+
+def test_jobstore_local_and_redis_parity(local_jobs, redis_jobs):
+    """两个后端在同一串操作后必须一致，切换后端才不会行为漂移。"""
+    base = time.time()
+    for store in (local_jobs, redis_jobs):
+        store.set("x", {"status": "running", "result": None, "error": None, "ts": base})
+        store.set("y", {"status": "done", "result": {"ok": 1}, "error": None, "ts": base + 1})
+    assert local_jobs.get("x") == redis_jobs.get("x")
+    assert local_jobs.get("y") == redis_jobs.get("y")
+    assert local_jobs.count_running() == redis_jobs.count_running() == 1
+    for store in (local_jobs, redis_jobs):
+        store.delete("x")
+    assert local_jobs.get("x") is None and redis_jobs.get("x") is None
+
+
+def test_jobstore_redis_survives_non_json_result(redis_jobs):
+    """结果里夹带非 JSON 原生对象时，Redis 后端应退化保存而不是写入失败。"""
+
+    class _Weird:
+        def __repr__(self):
+            return "<weird>"
+
+    redis_jobs.set("w", {"status": "done", "result": _Weird(), "ts": time.time()})
+    got = redis_jobs.get("w")
+    assert got is not None and got["status"] == "done"
+    assert "weird" in str(got["result"])
+
+
+def test_start_job_goes_through_job_store():
+    """_start_job 的结果应能从状态层读到（多副本共享的前提）。"""
+    from src.api.server import _jobs as server_jobs
+    from src.api.server import _start_job
+    jid = _start_job(lambda: {"echo": 42})
+    for _ in range(100):
+        job = server_jobs.get(jid)
+        if job and job.get("status") != "running":
+            break
+        time.sleep(0.05)
+    job = server_jobs.get(jid)
+    assert job is not None, "任务应落在状态层而不是本地私有字典"
+    assert job["status"] == "done", job
+    assert job["result"] == {"echo": 42}
