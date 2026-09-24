@@ -70,7 +70,8 @@ def chat(req: ChatReq):
 def feedback(req: FeedbackReq):
     fb = {"feedback_id": req.feedback_id, "summary": req.summary}
     # 自动触发研发 Agent：造工具 + 注册 + 沉淀 SOP（闭环自动化）
-    res = s.dev.fulfill_feedback(fb)
+    # D5：实例统一经运行时工厂取（AgentRegistry 查不到时回退全局 dev，行为不变）
+    res = s.runtime.dev_instance()[1].fulfill_feedback(fb)
     s._reload()
     s._save_trace("api_feedback", {"feedback": fb, "result": res})
     return {

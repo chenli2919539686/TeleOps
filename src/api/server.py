@@ -62,13 +62,14 @@ from src.core.alert_stream import AlertStream, build_playlist
 from src.llm_client import LLMClient
 from src.agents.ops_agent import OpsAgent
 from src.agents.dev_agent import DevAgent
+from src.core.agent_runtime import AgentRuntime
 from src.orchestration.graphs import build_ops_graph, build_dev_graph
 from src.orchestration import dispatch as dispatch_mod
 from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.28"
+VERSION = "0.8.29"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -302,6 +303,12 @@ ops_graph = build_ops_graph(ops)
 registry = AgentRegistry(cmdb, kb, tools, llm)
 ws_store = WorkspaceStore(registry=registry)
 registry.ws_store = ws_store   # 让 registry.set_status 能持久化到 SQLite
+# D5：Agent 运行时工厂 —— 让「执行」落到该租户/业务域自己的 Agent 实例上，
+# 而不是固定的全局 ops/dev 单例（多租户此前只在路由与状态灯层面隔离，
+# 实际推理仍是共享的一份）。注册表解析不到时回退全局单例 → 旧行为不回归。
+# 注：工厂不负责重载工具/知识，依赖 _reload_all 把「所有实例」一并重绑
+#     （否则会出现：A 域实例持有旧 tools 对象，看不到刚被研发造出的新工具）
+runtime = AgentRuntime(registry, ops, dev, build_ops_graph)
 board = RequirementBoard()
 dispatch_mode = {"value": "auto"}   # 自动 / 手动，可经 /dispatch/mode 切换
 adapters = AdapterRegistry()        # 外部系统适配器注册表（含预留接口）
@@ -405,13 +412,17 @@ def _ws_primary_ops(ws_id):
 
 
 def _reload():
-    """工具/知识被改后重新加载，并让运维 Agent 指向最新实例（闭环后再读最新状态）。"""
-    global tools, kb
-    with _jobs_lock:
-        tools = ToolRegistry()
-        kb = KBStore()
-        ops.tools = tools
-        ops.kb = kb
+    """工具/知识被改后重新加载，并让「所有」运维 Agent 实例指向最新对象。
+
+    D5 前这里只重绑全局 ops 单例，但多条执行链路（_run_agent_build、
+    _stream_make_processor、团队台 handle_alert 等）实际用的是注册表里
+    各业务域自己的实例 —— 那些实例仍持有旧 tools/kb 对象引用，于是
+    「研发刚造出的新工具」在紧接着的处置轮次里看不见，闭环像没生效
+    （典型的“实例级多 Agent”与“单例级 reload”不一致）。
+
+    改为统一按多 Agent 语义重绑全部实例（与原 _reload_all 等价）。
+    """
+    _reload_all()
 
 
 def _reload_all():
@@ -666,7 +677,7 @@ def _alert_flow(req: AlertReq):
             "alert": alert_obj, "normalized": {}, "diagnosis": {},
             "tool_results": [], "plan": {}, "missing_tool": "", "is_noise": False,
         }
-        out = ops_graph.invoke(state)
+        out = runtime.ops_graph(ops_id).invoke(state)
         _save_trace("api_alert", out)
         return out
     finally:
@@ -697,7 +708,7 @@ def _closed_loop_flow(req: ClosedLoopReq):
             "alert": alert_obj, "normalized": {}, "diagnosis": {},
             "tool_results": [], "plan": {}, "missing_tool": "", "is_noise": False,
         }
-        out1 = ops_graph.invoke(s1)
+        out1 = runtime.ops_graph(ops_id).invoke(s1)
         missing = out1.get("missing_tool", "")
         loop_log = {"round1": out1, "dev": None, "round2": None}
         if missing:
@@ -708,7 +719,7 @@ def _closed_loop_flow(req: ClosedLoopReq):
                     "feedback_id": "F-AUTO",
                     "summary": f"运维根因推理需要工具 {missing}，但工具库缺失，请研发生成",
                 }
-                dev_res = dev.fulfill_feedback(fb)
+                dev_res = runtime.dev_instance(dev_id)[1].fulfill_feedback(fb)
             finally:
                 registry.set_status(dev_id, "idle")
             _reload()
@@ -718,7 +729,7 @@ def _closed_loop_flow(req: ClosedLoopReq):
                 "alert": alert_obj, "normalized": {}, "diagnosis": {},
                 "tool_results": [], "plan": {}, "missing_tool": "", "is_noise": False,
             }
-            out2 = ops_graph.invoke(s2)
+            out2 = runtime.ops_graph(ops_id).invoke(s2)
             loop_log["round2"] = out2
         _save_trace("api_closed_loop", loop_log)
         return {
@@ -1202,6 +1213,9 @@ ctx._gc_jobs = _gc_jobs
 ctx.ops = ops
 ctx.dev = dev
 ctx.ops_graph = ops_graph
+# D5：Agent 运行时工厂 —— 新代码请一律经 s.runtime 取实例/图，直接用上面三个
+# 全局单例会绕过租户隔离（保留它们仅为兼容与兜底）。
+ctx.runtime = runtime
 ctx.board = board
 ctx.db = db
 ctx.dispatch_mod = dispatch_mod
