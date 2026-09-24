@@ -1,26 +1,99 @@
-"""TeleOps SQLite 持久化层（取代原先的 JSON 文件存储）。
+"""TeleOps 持久化层（DAL，数据访问层）。
 
-单文件数据库 data/teleops.db；首次运行自动建表，并从遗留的 JSON 文件
-（workspaces.json / requirements.json / tools.json / messages.json）一次性迁移，
-保证既有「核心网运维域 + 4 Agent + 2 工具」基线不丢。
+Phase 1 改造：从「裸 sqlite3 直连」升级为 **可切换数据源的 DAL**，
+为后续接入信创库（达梦/人大金仓）/ PostgreSQL 主从预留单一切换点
+（环境变量 ``TELEOPS_DB_DSN``），同时保持当前演示默认跑在 SQLite 上。
 
 设计要点：
-- 用标准库 sqlite3，零额外依赖；连接开启 foreign_keys 并加锁保证线程安全。
-- 所有写接口走 execute()，读接口走 query()/query_one()，均在锁内完成。
-- 表结构：users / workspaces / agents / requirements / tools / messages。
+- 连接工厂按 DSN 协议选择驱动；SQLite 走标准库零依赖，信创/PG 走懒加载
+  （沙箱未装对应驱动时给出明确安装指引，不会静默跑错库）。
+- SQL 写法保持**方言中立**（只用标准 SELECT/INSERT/UPDATE/DELETE + ``?`` 占位符，
+  非 SQLite 协议自动转 ``%s``），避免 SQLite 独有语法，便于平滑切换。
+- 多租户从「个人域（owner_id）」升级为「组织树 + RBAC」：
+  * org_units：组织节点树（parent_id + 物化 path，任意深度，避免递归 CTE）
+  * roles / role_permissions / user_roles：标准 RBAC（角色→权限，用户绑角色）
+  * users / workspaces 增加 org_id，可见性按「本人 org 及其子孙 org」收纳
+- 既有个人域（owner_id）判定保留，作为组织树之下的补充隔离维度。
+- 所有写走 execute()，读走 query()/query_one()，均在锁内完成；WAL 提升并发。
 """
+import importlib
 import json
 import os
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 from src.config import DATA_DIR
 
-# 数据库文件：默认 data/teleops.db；可用环境变量 TELEOPS_DB_FILE 覆盖（测试隔离用）
-DB_PATH = Path(os.environ.get("TELEOPS_DB_FILE") or str(DATA_DIR / "teleops.db"))
+# ---------------- DSN / 驱动切换点（信创预留） ----------------
+# 优先级：TELEOPS_DB_FILE（测试隔离用的单文件 SQLite）> TELEOPS_DB_DSN（信创/PG 切换点）>
+#         默认 data/teleops.db。
+# 信创/PG 形如：
+#   dm://user:pass@host:5236/dbname
+#   kingbase://user:pass@host:54321/dbname
+#   postgresql://user:pass@host:5432/dbname
+# 切换时只需改 TELEOPS_DB_DSN + 在部署环境 pip install 对应驱动。
+_DB_FILE = os.environ.get("TELEOPS_DB_FILE")
+if _DB_FILE:
+    DB_DSN = "sqlite://" + _DB_FILE
+else:
+    DB_DSN = os.environ.get("TELEOPS_DB_DSN") or f"sqlite://{DATA_DIR / 'teleops.db'}"
+
+# 非 SQLite 协议 → 需要的 Python 驱动模块（懒加载，装了才连）
+_DRIVER_MODULES = {
+    "dm": "dmPython",
+    "kingbase": "kingbase",
+    "postgresql": "psycopg",
+    "postgres": "psycopg",
+}
+# 这些协议使用 %s 占位符（SQLite/达梦/金仓用 ?）
+_PCTS_PLACEHOLDER_SCHEMES = {"postgresql", "postgres", "dm", "kingbase"}
+
+
+def _parse_dsn():
+    if "://" not in DB_DSN:
+        return "sqlite", DB_DSN  # 裸路径视为 sqlite 文件
+    scheme, rest = DB_DSN.split("://", 1)
+    return scheme.lower(), rest
+
+
+def _ph(sql: str) -> str:
+    """占位符方言归一：PG/达梦/金仓用 %s，其余（含 SQLite）保持 ?。"""
+    scheme, _ = _parse_dsn()
+    if scheme in _PCTS_PLACEHOLDER_SCHEMES:
+        return sql.replace("?", "%s")
+    return sql
+
+
+# 数据库文件 / 连接
 _LOCK = threading.Lock()
+_conn = None
+
+# RBAC 权限全集
+PERMISSIONS = [
+    "ws.view",      # 查看业务域 / Agent
+    "ws.manage",    # 创建/编辑/删除业务域、改模式
+    "agent.manage", # 域内增删改 Agent
+    "alert.ack",    # 确认/处置告警、启动告警流
+    "tool.exec",    # 执行/造运维工具（含高危需审批）
+    "audit.view",   # 查看操作审计
+    "org.manage",   # 管理组织节点、成员、角色
+]
+PERMISSION_SET = set(PERMISSIONS)
+
+# 内置角色 → 权限
+BUILTIN_ROLES = {
+    "super_admin": list(PERMISSIONS),                       # 全部权限
+    "org_admin":   ["ws.view", "ws.manage", "agent.manage",
+                    "alert.ack", "tool.exec", "audit.view", "org.manage"],
+    "sre":         ["ws.view", "agent.manage", "alert.ack", "tool.exec"],
+    "dev":         ["ws.view", "agent.manage"],
+    "viewer":      ["ws.view", "audit.view"],
+}
+ROOT_ORG_ID = "grp-root"
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -28,7 +101,31 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   is_admin INTEGER DEFAULT 0,
+  org_id TEXT,
   created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS org_units (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  parent_id TEXT,
+  path TEXT NOT NULL,
+  level INTEGER DEFAULT 0,
+  org_type TEXT DEFAULT 'team'
+);
+CREATE TABLE IF NOT EXISTS roles (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  builtin INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS role_permissions (
+  role_id TEXT NOT NULL,
+  permission TEXT NOT NULL,
+  PRIMARY KEY(role_id, permission)
+);
+CREATE TABLE IF NOT EXISTS user_roles (
+  user_id INTEGER NOT NULL,
+  role_id TEXT NOT NULL,
+  PRIMARY KEY(user_id, role_id)
 );
 CREATE TABLE IF NOT EXISTS workspaces (
   id TEXT PRIMARY KEY,
@@ -36,6 +133,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   adapter_id TEXT,
   mode TEXT DEFAULT 'auto',
   owner_id INTEGER,
+  org_id TEXT,
   created_at TEXT,
   FOREIGN KEY(owner_id) REFERENCES users(id)
 );
@@ -90,39 +188,71 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 """
 
-_conn = None
-
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def get_conn() -> sqlite3.Connection:
-    """惰性创建并缓存全局连接（线程安全）。
-
-    高可用加固（Phase 3）：
-    - journal_mode=WAL：读写不互斥（读不阻塞写、写不阻塞读），进程崩溃可恢复，
-      适合"HTTP 读请求 + 后台 Agent 写任务"并发的运行形态；
-    - synchronous=NORMAL：WAL 下兼顾持久性与吞吐（崩溃最多丢最近一次提交，不损坏库）；
-    - busy_timeout=5000：锁冲突时最多等 5s 而非立刻抛 database is locked（配合外层锁兜底）。
-    """
+def _raw_connect():
+    """按 DSN 选择驱动并建立连接（缓存于模块级 _conn）。"""
     global _conn
-    if _conn is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=5.0)
+    scheme, target = _parse_dsn()
+    if scheme == "sqlite":
+        _conn = sqlite3.connect(target, check_same_thread=False, timeout=5.0)
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA foreign_keys = ON")
         _conn.execute("PRAGMA journal_mode = WAL")
         _conn.execute("PRAGMA synchronous = NORMAL")
         _conn.execute("PRAGMA busy_timeout = 5000")
+        return _conn
+    # ---- 信创 / PostgreSQL 切换点 ----
+    mod = _DRIVER_MODULES.get(scheme)
+    if not mod:
+        raise RuntimeError(
+            f"不支持的数据库协议 '{scheme}'（DSN={DB_DSN}）。"
+            f"当前支持的协议：sqlite / dm / kingbase / postgresql。")
+    try:
+        driver = importlib.import_module(mod)
+    except ImportError as e:
+        raise RuntimeError(
+            f"未安装 '{scheme}' 数据库驱动（需模块 {mod}），无法连接 {DB_DSN}。\n"
+            f"请在部署环境执行：pip install {mod}\n"
+            f"（当前开发/演示默认使用 SQLite，设置 TELEOPS_DB_DSN=sqlite://<路径> 即可）"
+        ) from e
+    # 达梦/金仓/PG 的 connect 接口基本一致（传 DSN 字符串）
+    _conn = driver.connect(target)
+    try:
+        _conn.row_factory = sqlite3.Row  # PG 的 psycopg 无 Row，下方读取按 dict 兼容
+    except Exception:
+        pass
+    return _conn
+
+
+def get_conn() -> object:
+    """惰性创建并缓存全局连接（线程安全）。首次连接建表 + 迁移 + 播种 RBAC。"""
+    global _conn
+    if _conn is None:
+        _raw_connect()
         _init_schema()
+        _migrate_columns()
         _migrate_from_json()
+        _seed_rbac()
     return _conn
 
 
 def _init_schema():
-    _conn.executescript(_SCHEMA)
-    _conn.commit()
+    get_conn().executescript(_SCHEMA)
+    get_conn().commit()
+
+
+def _migrate_columns():
+    """为既有库补齐新列（org_id），幂等。"""
+    for col, table in (("org_id", "users"), ("org_id", "workspaces")):
+        try:
+            get_conn().execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+            get_conn().commit()
+        except Exception:
+            pass  # 列已存在则忽略
 
 
 def _migrate_from_json():
@@ -196,26 +326,77 @@ def _migrate_from_json():
     get_conn().commit()
 
 
-# ---------------- 通用封装（线程安全） ----------------
+# ---------------- RBAC 播种（幂等） ----------------
+def _seed_rbac():
+    """播根组织 + 内置角色 + 为既有用户指派组织/角色（向后兼容）。
+
+    - 根组织 grp-root（集团总部）。
+    - 5 个内置角色及其权限。
+    - 既有 users.org_id 为空 → 归入根组织；is_admin 者授 super_admin，否则授 sre。
+    - 新用户由 auth.create_user 自行建个人组织叶节点并授角色。
+    """
+    if not query_one("SELECT 1 FROM org_units WHERE id=?", (ROOT_ORG_ID,)):
+        execute("INSERT INTO org_units (id,name,parent_id,path,level,org_type) "
+                "VALUES (?,?,?,?,?,?)",
+                (ROOT_ORG_ID, "集团总部", None, "/" + ROOT_ORG_ID, 0, "group"))
+    for rid, perms in BUILTIN_ROLES.items():
+        if not query_one("SELECT 1 FROM roles WHERE id=?", (rid,)):
+            execute("INSERT INTO roles (id,name,builtin) VALUES (?,?,1)", (rid, rid))
+        for p in perms:
+            execute("INSERT OR IGNORE INTO role_permissions (role_id,permission) VALUES (?,?)",
+                    (rid, p))
+    # 既有用户补齐组织 + 角色
+    for u in query("SELECT * FROM users"):
+        if not u["org_id"]:
+            execute("UPDATE users SET org_id=? WHERE id=?", (ROOT_ORG_ID, u["id"]))
+        rid = "super_admin" if u["is_admin"] else "sre"
+        execute("INSERT OR IGNORE INTO user_roles (user_id,role_id) VALUES (?,?)",
+                (u["id"], rid))
+
+
+def org_path_of(org_id: str) -> Optional[str]:
+    """返回组织物化路径（用于子树包含判定）；不存在返回 None。"""
+    r = query_one("SELECT path FROM org_units WHERE id=?", (org_id,))
+    return r["path"] if r else None
+
+
+# ---------------- 通用封装（线程安全 + 方言中立） ----------------
 def execute(sql: str, params=()):
-    """执行写操作并提交，返回 cursor（调用方可用 rowcount 判断影响行数）。"""
+    """执行写操作并提交，返回 cursor（调用方可用 rowcount 判断影响行数）。
+
+    注意：``get_conn()`` 必须在加锁**之前**调用。首次调用会触发建表/迁移/播种，
+    而播种内部又会回调用 ``execute/query``——若 get_conn 在锁内，会因非重入锁
+    造成递归死锁。把初始化放在锁外即可解开。
+    """
+    conn = get_conn()
     with _LOCK:
-        conn = get_conn()
-        cur = conn.execute(sql, params)
+        cur = conn.execute(_ph(sql), params)
         conn.commit()
     return cur
 
 
 def query(sql: str, params=()):
+    conn = get_conn()
     with _LOCK:
-        rows = get_conn().execute(sql, params).fetchall()
-    return rows
+        rows = conn.execute(_ph(sql), params).fetchall()
+    # PG 驱动返回的不是 sqlite.Row，统一转 dict 方便上层访问
+    return [_row_to_dict(r) for r in rows]
 
 
 def query_one(sql: str, params=()):
+    conn = get_conn()
     with _LOCK:
-        row = get_conn().execute(sql, params).fetchone()
-    return row
+        row = conn.execute(_ph(sql), params).fetchone()
+    return _row_to_dict(row) if row is not None else None
+
+
+def _row_to_dict(row):
+    if isinstance(row, dict):
+        return row
+    try:
+        return {k: row[k] for k in row.keys()}
+    except Exception:
+        return dict(row)
 
 
 # ---------------- 操作审计（多租户问责） ----------------
@@ -234,8 +415,8 @@ def audit(actor, action, workspace_id=None, detail=None, result="ok",
     try:
         if detail is not None and not isinstance(detail, str):
             detail = json.dumps(detail, ensure_ascii=False)
+        conn = get_conn()
         with _LOCK:
-            conn = get_conn()
             conn.execute(
                 "INSERT INTO audit_log "
                 "(ts,actor,actor_id,action,workspace_id,detail,result,ip) "

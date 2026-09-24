@@ -9,7 +9,7 @@ import json
 import re
 from typing import Optional, List, Dict, Any
 
-from src.core import db
+from src.core import db, auth
 
 
 def _slug(name: str) -> str:
@@ -105,18 +105,18 @@ class WorkspaceStore:
             out.append(a)
         return out
 
-    def list(self, owner_id: Optional[int] = None) -> List[dict]:
-        """列出业务域。
+    def list(self, owner_id: Optional[int] = None, user: Optional[dict] = None) -> List[dict]:
+        """列出业务域（按组织树 + RBAC 做多租户隔离）。
 
-        owner_id 不传（None）→ 返回全部（系统/管理视角，保持向后兼容）。
-        owner_id = -1 → 匿名访客，只返回公共域（owner_id IS NULL），避免暴露所有用户个人域。
-        传真实 owner_id → 多租户隔离：只返回「公共域」+「本人私有域」，
-        别人的私有域对其完全不可见。
+        - user 不传（None）→ 仅返回公共域（向后兼容系统/管理视角，配合 is_admin 全可见）。
+        - 旧调用若传 owner_id（int），等效于只看该 owner 的个人域 + 公共域。
+        - 标准行为：返回「公共域 + 用户组织树可见域 + 本人个人域」。
         """
+        if user is None and owner_id is not None:
+            user = {"uid": owner_id, "is_admin": False}  # 旧 owner_id 语义兼容
         out = []
         for w in db.query("SELECT * FROM workspaces ORDER BY id"):
-            # 私有域（owner_id 非 NULL）仅本人可见；公共域对所有登录用户可见
-            if owner_id is not None and w["owner_id"] is not None and w["owner_id"] != owner_id:
+            if not self._visible_to_user(w, user):
                 continue
             agents = self._agents_of(w["id"])
             out.append({
@@ -128,43 +128,57 @@ class WorkspaceStore:
             })
         return out
 
-    def visible_workspace_ids(self, owner_id: Optional[int] = None) -> List[str]:
-        """返回某用户可见的业务域 id 集合（公共域 + 本人域），供 /agents 等接口做隔离过滤。"""
-        return [w["id"] for w in self.list(owner_id=owner_id)]
+    def visible_workspace_ids(self, owner_id: Optional[int] = None,
+                              user: Optional[dict] = None) -> List[str]:
+        """返回某用户可见的业务域 id 集合，供 /agents、/audit 等接口做隔离过滤。"""
+        return [w["id"] for w in self.list(user=user)]
 
-    def is_visible_to(self, ws_id: str, user: Optional[dict]) -> bool:
-        """当前用户是否有权查看该业务域。"""
-        w = db.query_one("SELECT owner_id FROM workspaces WHERE id=?", (ws_id,))
-        if not w:
-            return False
-        owner_id = w["owner_id"]
-        if owner_id is None:
-            return True  # 公共域对所有用户可见
+    def _visible_to_user(self, w: dict, user: Optional[dict]) -> bool:
+        """统一可见性判定：公共域 / 本人个人域 / 组织树包含 + ws.view 权限 / admin 全可见。"""
+        owner_id = w.get("owner_id")
+        org_id = w.get("org_id")
+        if owner_id is None and org_id is None:
+            return True  # 公共域（如 core-net）对所有用户可见
         if not user:
             return False
         if user.get("is_admin"):
             return True
-        return owner_id == user.get("uid")
+        if owner_id is not None and owner_id == user.get("uid"):
+            return True
+        if org_id and auth.enforce(user, "ws.view", org_id):
+            return True
+        return False
+
+    def is_visible_to(self, ws_id: str, user: Optional[dict]) -> bool:
+        """当前用户是否有权查看该业务域。"""
+        w = db.query_one("SELECT owner_id, org_id FROM workspaces WHERE id=?", (ws_id,))
+        if not w:
+            return False
+        return self._visible_to_user(w, user)
 
     def is_writable_by(self, ws_id: str, user: Optional[dict]) -> bool:
         """当前用户是否有权修改该业务域（增删改 agent / 改 mode / 删域）。
 
-        规则：
-        - 公共域（owner_id IS NULL）仅 admin 可写；
-        - 私有域仅 owner 本人可写；
-        - admin 可写任何域（管理需要）。
+        规则（组织树 + RBAC）：
+        - super_admin 可写任何域；
+        - 本人个人域（owner_id==uid）可写；
+        - 用户在目标 org 拥有 ws.manage 权限 → 可写其组织树下的域；
+        - 公共域仅 admin 可写。
         """
         if not user:
             return False
-        w = db.query_one("SELECT owner_id FROM workspaces WHERE id=?", (ws_id,))
+        w = db.query_one("SELECT owner_id, org_id FROM workspaces WHERE id=?", (ws_id,))
         if not w:
             return False
         if user.get("is_admin"):
             return True
         owner_id = w["owner_id"]
-        if owner_id is None:
-            return False  # 公共域仅 admin 可写
-        return owner_id == user.get("uid")
+        if owner_id is not None and owner_id == user.get("uid"):
+            return True
+        org_id = w["org_id"]
+        if org_id and auth.enforce(user, "ws.manage", org_id):
+            return True
+        return False
 
     def get(self, ws_id) -> Optional[dict]:
         w = db.query_one("SELECT * FROM workspaces WHERE id=?", (ws_id,))
@@ -194,13 +208,15 @@ class WorkspaceStore:
         return f"ws-{n}"
 
     def create(self, name: str, adapter_id: Optional[str], mode: str = "auto",
-               custom_id: Optional[str] = None, owner_id: Optional[int] = None) -> dict:
+               custom_id: Optional[str] = None, owner_id: Optional[int] = None,
+               org_id: Optional[str] = None) -> dict:
         ws_id = custom_id or self._next_ws_id()
         if db.query_one("SELECT 1 FROM workspaces WHERE id=?", (ws_id,)):
             raise ValueError(f"业务域 {ws_id} 已存在")
         db.execute(
-            "INSERT INTO workspaces (id,name,adapter_id,mode,owner_id,created_at) VALUES (?,?,?,?,?,?)",
-            (ws_id, name, adapter_id, mode, owner_id, db._now()))
+            "INSERT INTO workspaces (id,name,adapter_id,mode,owner_id,org_id,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ws_id, name, adapter_id, mode, owner_id, org_id, db._now()))
         # 每个新域初始化一套基础 Agent：1 运维 + 1 研发，可后续改名/扩展
         agents = [
             {"id": f"{ws_id}-ops-main", "name": f"{name}·运维 Agent", "kind": "ops",
@@ -219,7 +235,7 @@ class WorkspaceStore:
                                        a["description"], primary=a["primary"], workspace_id=ws_id)
         return self.get(ws_id)
 
-    def create_personal(self, owner_id: int, username: str) -> dict:
+    def create_personal(self, owner_id: int, username: str, org_id: Optional[str] = None) -> dict:
         """为新注册用户建一套个人业务域，复制默认域的完整 Agent 矩阵（4 个）。
 
         域 id 用 ws-<username> 便于辨识且天然唯一（重名用户 id 不同但用户名唯一）；
@@ -233,8 +249,9 @@ class WorkspaceStore:
             n += 1
         name = f"{username} 的工作域"
         db.execute(
-            "INSERT INTO workspaces (id,name,adapter_id,mode,owner_id,created_at) VALUES (?,?,?,?,?,?)",
-            (ws_id, name, "alert-prometheus", "auto", owner_id, db._now()))
+            "INSERT INTO workspaces (id,name,adapter_id,mode,owner_id,org_id,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ws_id, name, "alert-prometheus", "auto", owner_id, org_id, db._now()))
         for a in DEFAULT_WORKSPACE["agents"]:
             agent_id = f"{ws_id}-{a['id'].split('-', 1)[-1]}"  # 去掉默认域前缀，换成个人域前缀
             db.execute(

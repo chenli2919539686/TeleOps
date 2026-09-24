@@ -68,7 +68,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.25"
+VERSION = "0.8.26"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -781,10 +781,10 @@ def auth_register(req: AuthReq, request: Request):
                  detail={"reason": "exists"}, ip=_client_ip(request))
         raise HTTPException(status_code=409, detail="用户名已存在")
     u = auth.create_user(req.username, req.password)
-    # 为新用户建个人域（多租户隔离：owner_id 绑定，仅本人可见）
+    # 为新用户建个人域（多租户隔离：owner_id + org_id 绑定，仅本人可见）
     ws_id = None
     try:
-        ws = ws_store.create_personal(u["id"], u["username"])
+        ws = ws_store.create_personal(u["id"], u["username"], org_id=u.get("org_id"))
         ws_id = ws.get("id")
     except Exception as e:  # 建域失败不应阻断注册，仅记录
         metrics.inc("teleops_register_personal_ws_failed")
@@ -792,8 +792,10 @@ def auth_register(req: AuthReq, request: Request):
     db.audit(u["username"], "auth.register", workspace_id=ws_id,
              detail={"ws": ws_id, "is_admin": bool(u["is_admin"])},
              result="ok", actor_id=u["id"], ip=_client_ip(request))
-    token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
-    return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
+    token = auth.issue_token(u["username"])
+    return {"token": token, "user": {
+        "username": u["username"], "uid": u["id"], "is_admin": u["is_admin"],
+        "org_id": u.get("org_id"), "roles": u.get("roles"), "perms": u.get("perms")}}
 
 
 @app.post("/auth/login")
@@ -805,8 +807,10 @@ def auth_login(req: AuthReq, request: Request):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     db.audit(u["username"], "auth.login", result="ok", actor_id=u["id"],
              ip=_client_ip(request))
-    token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
-    return {"token": token, "user": {"username": u["username"], "uid": u["id"], "is_admin": u["is_admin"]}}
+    token = auth.issue_token(u["username"])
+    return {"token": token, "user": {
+        "username": u["username"], "uid": u["id"], "is_admin": u["is_admin"],
+        "org_id": u.get("org_id"), "roles": u.get("roles"), "perms": u.get("perms")}}
 
 
 @app.get("/auth/me")
@@ -815,7 +819,9 @@ def auth_me(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="未登录")
     return {"username": user.get("sub"), "uid": user.get("uid"),
-            "is_admin": user.get("is_admin", False)}
+            "is_admin": user.get("is_admin", False),
+            "org_id": user.get("org_id"), "roles": user.get("roles"),
+            "perms": user.get("perms")}
 
 
 @app.post("/auth/logout")
@@ -1282,8 +1288,7 @@ def agents(workspace_id: Optional[str] = None, request: Request = None):
     未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。
     """
     user = getattr(request.state, "user", None) if request else None
-    owner_id = user.get("uid") if user else -1  # -1 表示匿名，仅可见公共域
-    visible = set(ws_store.visible_workspace_ids(owner_id))
+    visible = set(ws_store.visible_workspace_ids(user=user))
     items = registry.list(workspace_id=workspace_id)
     items = [a for a in items if a.get("workspace_id") in visible]
     return {
@@ -1501,8 +1506,7 @@ def list_workspaces(request: Request):
     """列出当前登录用户可见的业务域（公共域 + 本人私有域）。多租户隔离。
     未登录（匿名）时只返回公共域，避免暴露所有用户的个人域。"""
     user = getattr(request.state, "user", None)
-    owner_id = user.get("uid") if user else -1  # -1 表示匿名，仅可见公共域
-    wss = ws_store.list(owner_id=owner_id)
+    wss = ws_store.list(user=user)
     # 附带各业务域「待处理需求数」（未闭环、未驳回），供作战室悬浮卡展示
     for w in wss:
         w["pending"] = len([
@@ -1549,13 +1553,15 @@ def post_message(ws_id: str, req: MessageReq):
 def create_workspace(req: CreateWorkspaceReq, request: Request):
     if req.mode not in ("auto", "manual"):
         raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
-    # 记录创建者（JWT 登录用户），便于后续多租户归属
+    # 记录创建者（JWT 登录用户）与归属组织，便于后续组织树 + RBAC 隔离
     owner_id = None
     user = getattr(request.state, "user", None)
     if user and user.get("uid"):
         owner_id = user["uid"]
+    org_id = user.get("org_id") if user else None
     try:
-        ws = ws_store.create(req.name, req.adapter_id, req.mode, req.custom_id, owner_id=owner_id)
+        ws = ws_store.create(req.name, req.adapter_id, req.mode, req.custom_id,
+                            owner_id=owner_id, org_id=org_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit_write(request, "workspace.create", ws["id"],
@@ -1681,7 +1687,7 @@ def list_audit(request: Request, limit: int = 50, offset: int = 0,
     elif is_admin:
         where, params = "", []
     else:
-        visible = ws_store.visible_workspace_ids(uid)
+        visible = ws_store.visible_workspace_ids(user=user)
         if not visible:
             where, params = "WHERE 1=0", []
         else:
@@ -1914,7 +1920,7 @@ def oidc_callback(dev_user: Optional[str] = None, name: Optional[str] = None,
     u = auth.get_user(sub_email)
     if not u:
         u = auth.create_user(sub_email, os.urandom(12).hex())
-    token = auth.encode_token({"sub": u["username"], "uid": u["id"], "is_admin": u["is_admin"]})
+    token = auth.issue_token(u["username"])
     db.audit(u["username"], "auth.oidc", result="ok", actor_id=u["id"],
              ip="oidc")
     return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]},
