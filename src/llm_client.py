@@ -7,6 +7,7 @@
   - Mock 用 [TASK:xxx] 标记路由，输出可被 Agent 稳定解析，演示故事连贯。
 """
 import re
+import os
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,14 @@ if str(ROOT) not in sys.path:
 from src.config import load_llm_config
 from src.core import usage
 from src.triage_rules import rule_triage, alert_from_prompt
+
+
+# 真实调用的单次超时（秒）。
+# OpenAI SDK 不传 timeout 时用的是它自己的默认值（长达数百秒）：一旦 Key 配了但
+# 对端慢/不可达，告警流水线会逐条卡死在这上面 —— 界面看起来像"流水线停不下来"，
+# 且 /stream/stop 也要等 join 超时才返回。这里统一收紧为有界超时，
+# 超时异常会被 complete() 捕获并自动降级 Mock，演示不会崩。
+LLM_TIMEOUT = float(os.environ.get("TELEOPS_LLM_TIMEOUT", "30") or 30)
 
 
 def extract_json(text):
@@ -104,14 +113,18 @@ class LLMClient:
                 return
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key=api_key.strip(), base_url=base_url.strip() or None)
+                self._client = OpenAI(api_key=api_key.strip(),
+                                     base_url=base_url.strip() or None,
+                                     timeout=LLM_TIMEOUT)
             except Exception as e:
                 print(f"  [LLMClient] 创建 OpenAI client 失败：{e}")
                 self.mode = "mock"
         elif provider == "local":
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key="ollama", base_url=local_endpoint.strip() or None)
+                self._client = OpenAI(api_key="ollama",
+                                     base_url=local_endpoint.strip() or None,
+                                     timeout=LLM_TIMEOUT)
             except Exception as e:
                 print(f"  [LLMClient] 创建 local client 失败：{e}")
                 self.mode = "mock"

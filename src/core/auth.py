@@ -128,6 +128,10 @@ def issue_token(username: str) -> str:
         raise ValueError(f"用户不存在：{username}")
     claims = {
         "sub": u["username"],
+        # D3 修复：原先只有标准声明 sub，但业务代码习惯按 user["username"] 取用户名
+        # （如告警流水线的 started_by），缺这个字段会导致登录用户被显示成"匿名"。
+        # sub 仍是权威身份声明，这里补一份便于消费；缺省的子声明兼容见调用侧回退。
+        "username": u["username"],
         "uid": u["id"],
         "is_admin": u["is_admin"],
         "org_id": u.get("org_id"),

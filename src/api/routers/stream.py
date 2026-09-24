@@ -54,7 +54,11 @@ def stream_start(req: StreamStartReq, request: Request):
                        "请先停止再启动")
         stream._process = s._stream_make_processor(req.workspace_id, ops_id, mode,
                                               route_by_alert=req.ops_agent_id is None)
-        started_by = (user or {}).get("username") or "匿名"
+        # D3 修复：早期签发的 token 里只有标准声明 sub、没有 username，
+        # 导致已登录用户的流水线被记成"由 匿名 启动"。按 username → sub 顺序取，
+        # 兼容新旧 token（auth.issue_token 现已同时写入两个字段）。
+        started_by = ((user or {}).get("username")
+                      or (user or {}).get("sub") or "匿名")
         stream.start(playlist, profile=req.profile,
                      interval_ms=req.interval_ms, loop=req.loop, ops_agent_id=ops_id,
                      started_by=started_by)
