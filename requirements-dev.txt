@@ -2,3 +2,9 @@
 # 安装：pip install -r requirements-dev.txt
 -r requirements.txt
 pytest>=8.0
+# D3：tests/test_state_store.py 用 fakeredis + Lua 真实执行 Redis 后端，
+# 校验其与本地实现语义对齐；未安装时这些用例会自动跳过。
+fakeredis>=2.0
+# 仅在选用 Redis 后端时才需要客户端包（src/core/state_store.py 内延迟导入，非硬依赖）：
+# 设 TELEOPS_STATE_STORE=redis 前需 pip install redis
+redis>=5.0
