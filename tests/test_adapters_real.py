@@ -317,3 +317,68 @@ def test_fiveg_oss_sample_csv_end_to_end():
     assert {a["host"] for a in info} == {"101-1", "102-1", "103-1", "104-1", "105-1"}  # 噪声小区 info 下被识别
     assert (len(info) - len(major)) == 4    # warning 级噪声被 major 下限抑制
     assert all(a["ts"].endswith("Z") for a in major)  # 时间戳规整
+
+
+# ---------------- Prometheus 适配器（直连） ----------------
+def test_prometheus_demo_returns_synthetic():
+    from src.adapters.real_adapters import PrometheusAdapter
+    adp = PrometheusAdapter()  # 无 base_url -> demo
+    res = adp.query_metrics("node_cpu_seconds_total", hours=1)
+    assert res["mode"] == "demo"
+    assert len(res["series"]) > 0
+    assert all("value" in s and "ts" in s for s in res["series"])
+
+
+def test_prometheus_live_parses_query_range(monkeypatch):
+    from src.adapters.real_adapters import PrometheusAdapter, requests as ra
+    fake = MagicMock()
+    fake.raise_for_status.return_value = None
+    fake.json.return_value = {
+        "status": "success",
+        "data": {"result": [{"metric": {"instance": "a"},
+                             "values": [[100, "0.9"], [200, "0.8"]]}]},
+    }
+    monkeypatch.setattr(ra, "get", lambda *a, **k: fake)
+    adp = PrometheusAdapter({"base_url": "http://prom:9090", "api_key": "x"})
+    res = adp.query_metrics("up", hours=1)
+    assert res["mode"] == "live"
+    assert res["series"] == [{"ts": 100, "value": 0.9}, {"ts": 200, "value": 0.8}]
+    assert fake.json.call_count == 1
+
+
+# ---------------- Loki 适配器（LogQL） ----------------
+def test_loki_demo_logs():
+    from src.adapters.real_adapters import LokiLogAdapter
+    adp = LokiLogAdapter()  # 无 base_url -> demo
+    logs = adp.fetch_recent('{job="x"}', limit=100)
+    assert len(logs) > 0
+    assert all(l["source"] == "loki" for l in logs)
+    assert logs[0]["value"].startswith("[")
+
+
+def test_loki_live_parses_query_range(monkeypatch):
+    from src.adapters.real_adapters import LokiLogAdapter, requests as ra
+    fake = MagicMock()
+    fake.raise_for_status.return_value = None
+    fake.json.return_value = {
+        "status": "success",
+        "data": {"result": [{"stream": {"job": "app", "level": "error"},
+                             "values": [["1700000000000000000", "boom"],
+                                        ["1700000001000000000", "bang"]]}]},
+    }
+    monkeypatch.setattr(ra, "get", lambda *a, **k: fake)
+    adp = LokiLogAdapter({"base_url": "http://loki:3100", "api_key": "x"})
+    logs = adp.fetch_recent('{job="app"}', limit=10)
+    assert len(logs) == 2
+    assert logs[0]["source"] == "loki"
+    assert logs[0]["metric"] == "app"
+    assert "raw" in logs[0] and logs[0]["raw"]["labels"]["level"] == "error"
+
+
+def test_registry_exposes_monitoring_adapters():
+    from src.adapters.registry import AdapterRegistry
+    reg = AdapterRegistry()
+    ids = {a["id"] for a in reg.list()}
+    assert "metrics-prometheus" in ids
+    assert "logs-loki" in ids
+    assert "metrics-grafana" in ids

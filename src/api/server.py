@@ -75,7 +75,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.39"
+VERSION = "0.8.40"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -1208,9 +1208,10 @@ class MetricsQueryReq(BaseModel):
 
 @app.post("/adapters/{adapter_id}/query")
 def adapter_query(adapter_id: str, req: MetricsQueryReq):
-    """让 Agent / 前端主动查询真实监控指标（Grafana/Prometheus）。
+    """让 Agent / 前端主动查询真实监控指标（Grafana/Prometheus/Loki）。
 
-    未配置真实 base_url 时返回仿真时序；配置后接真实 Prometheus /api/v1/query_range。
+    未配置真实 base_url 时返回仿真时序；配置后接真实 Prometheus /api/v1/query_range
+    或 Loki 日志量统计。
     """
     adp = adapters.get(adapter_id)
     if not adp:
@@ -1219,6 +1220,30 @@ def adapter_query(adapter_id: str, req: MetricsQueryReq):
         raise HTTPException(status_code=400, detail=f"{adp.id} 不支持指标查询")
     try:
         return adp.query_metrics(req.promql, hours=req.hours)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"查询失败：{e}")
+
+
+# ---------------- 日志查询（Loki / ELK / Grafana logs，MCP 风格） ----------------
+class LogQueryReq(BaseModel):
+    query: str = '{job=~".+"}'
+    limit: int = 100
+
+
+@app.post("/adapters/{adapter_id}/logs")
+def adapter_logs(adapter_id: str, req: LogQueryReq):
+    """让 Agent / 前端拉取真实日志（Loki 用 LogQL、ELK 用 Lucene/KQL、Grafana 日志）。
+
+    未配置真实 base_url 时返回仿真日志行；配置后接真实 Loki /loki/api/v1/query_range 等。
+    """
+    adp = adapters.get(adapter_id)
+    if not adp:
+        raise HTTPException(status_code=404, detail=f"adapter {adapter_id} 不存在")
+    if not hasattr(adp, "fetch_recent"):
+        raise HTTPException(status_code=400, detail=f"{adp.id} 不支持日志拉取")
+    try:
+        return {"adapter_id": adp.id, "mode": "live" if adp.base_url else "demo",
+                "logs": adp.fetch_recent(req.query, limit=req.limit)}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"查询失败：{e}")
 

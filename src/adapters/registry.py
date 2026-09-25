@@ -12,7 +12,8 @@ from src.adapters.sample_adapters import (
     LocalKnowledgeAdapter, LocalExecAdapter,
 )
 from src.adapters.real_adapters import (
-    ZabbixAlertAdapter, ELKLogAdapter, FiveGKpiAdapter, GrafanaAdapter,
+    ZabbixAlertAdapter, ELKLogAdapter, FiveGKpiAdapter,
+    GrafanaAdapter, PrometheusAdapter, LokiLogAdapter,
 )
 from src.adapters.reserved_adapters import (
     IMasterAlertAdapter,
@@ -41,6 +42,8 @@ class AdapterRegistry:
         self.register(ELKLogAdapter(cfgs.get("log-elk")))
         self.register(FiveGKpiAdapter(cfgs.get("alert-5g")))
         self.register(GrafanaAdapter(cfgs.get("metrics-grafana")))
+        self.register(PrometheusAdapter(cfgs.get("metrics-prometheus")))
+        self.register(LokiLogAdapter(cfgs.get("logs-loki")))
         # 预留（接口已设计、待接入）
         self.register(IMasterAlertAdapter())
         self.register(BlueKingCMDBAdapter())

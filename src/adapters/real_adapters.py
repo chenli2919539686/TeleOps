@@ -583,3 +583,186 @@ class GrafanaAdapter(LogAdapter):
                     "status": resp.json().get("status")}
         except Exception as e:  # noqa: BLE001
             return {"reachable": False, "mode": "live", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 直连 Prometheus（北向·感知）：与 GrafanaAdapter 区分身份
+# ---------------------------------------------------------------------------
+# 说明：GrafanaAdapter 走「Grafana 数据源代理」（可指向 Prometheus/InfluxDB 等），
+# 本适配器**直连 Prometheus HTTP API**，二者职责分离、互不替代。两者都暴露
+# query_metrics（供 /adapters/{id}/query 调用），未配置 base_url 时回退仿真时序。
+class PrometheusAdapter(LogAdapter):
+    """直连 Prometheus 拉取指标时序，让 Agent 能主动查实时指标做诊断。
+
+    真实接入：配置 base_url（如 http://prometheus:9090）+ api_key 后，
+    query_metrics 直调 Prometheus /api/v1/query_range；未配置回退仿真时序。
+    """
+    id = "metrics-prometheus"
+    name = "Prometheus 指标接入（直连）"
+    system = "Prometheus"
+    direction = NORTH
+    status = "sample"
+    description = "直连 Prometheus HTTP API 拉取指标时序供 Agent 诊断；配置后接真实 Prometheus。"
+
+    def __init__(self, config: Optional[dict] = None):
+        cfg = config or {}
+        self.base_url: str = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key: str = cfg.get("api_key") or ""
+        self.verify_ssl: bool = bool(cfg.get("verify_ssl", False))
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def query_metrics(self, promql: str, hours: int = 1) -> Dict[str, Any]:
+        if not self.base_url:
+            return {"mode": "demo", "promql": promql,
+                    "series": GrafanaAdapter._synthetic_series(promql, hours)}
+        if requests is None:
+            raise RuntimeError("未安装 requests，无法查询 Prometheus")
+        end = int(time.time())
+        start = end - hours * 3600
+        step = max(30, (end - start) // 60)
+        resp = requests.get(f"{self.base_url}/api/v1/query_range",
+                            params={"query": promql, "start": start, "end": end, "step": step},
+                            headers=self._headers(), timeout=15, verify=self.verify_ssl)
+        resp.raise_for_status()
+        data = resp.json().get("data", {}).get("result", []) or []
+        series = []
+        for d in data:
+            for ts, val in d.get("values", []):
+                series.append({"ts": ts, "value": float(val)})
+        return {"mode": "live", "promql": promql, "series": series}
+
+    def fetch_recent(self, query: str, limit: int = 100) -> List[Dict[str, Any]]:
+        res = self.query_metrics(query, hours=1)
+        return [{"ts": s["ts"], "metric": query, "value": s["value"],
+                 "source": "prometheus", "raw": s} for s in res.get("series", [])[:limit]]
+
+    def healthcheck(self) -> Dict[str, Any]:
+        if not self.base_url:
+            return {"reachable": True, "mode": "demo",
+                    "endpoint": "<prometheus-url>/api/v1/query_range",
+                    "note": "未配置真实地址，query_metrics 返回仿真时序；配置 base_url+api_key 后接真实 Prometheus"}
+        if requests is None:
+            return {"reachable": None, "mode": "live", "note": "未安装 requests"}
+        try:
+            resp = requests.get(f"{self.base_url}/api/v1/query",
+                                params={"query": "up"}, headers=self._headers(),
+                                timeout=10, verify=self.verify_ssl)
+            resp.raise_for_status()
+            return {"reachable": True, "mode": "live", "status": resp.json().get("status")}
+        except Exception as e:  # noqa: BLE001
+            return {"reachable": False, "mode": "live", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Loki 日志接入（北向·感知）：LogQL 查询
+# ---------------------------------------------------------------------------
+class LokiLogAdapter(LogAdapter):
+    """用 LogQL 查询 Loki 日志，让 Agent 能做日志级故障定位（对齐 TelcoNet 的 Loki/Tempo）。
+
+    真实接入：配置 base_url（如 http://loki:3100）+ api_key 后，
+    fetch_recent 直调 Loki /loki/api/v1/query_range；未配置回退仿真日志行。
+    query_metrics 把 LogQL 当作日志量统计（count_over_time 即时查询）。
+    """
+    id = "logs-loki"
+    name = "Loki 日志接入"
+    system = "Loki / Grafana Logs"
+    direction = NORTH
+    status = "sample"
+    description = "用 LogQL 查询 Loki 日志供 Agent 故障定位；配置后接真实 Loki。"
+
+    def __init__(self, config: Optional[dict] = None):
+        cfg = config or {}
+        self.base_url: str = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key: str = cfg.get("api_key") or ""
+        self.verify_ssl: bool = bool(cfg.get("verify_ssl", False))
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    def fetch_recent(self, query: str = '{job=~".+"}', limit: int = 100) -> List[Dict[str, Any]]:
+        if not self.base_url:
+            return self._demo_logs(query, limit)
+        if requests is None:
+            raise RuntimeError("未安装 requests，无法查询 Loki")
+        end = int(time.time() * 1e9)
+        start = end - 6 * 3600 * int(1e9)
+        resp = requests.get(f"{self.base_url}/loki/api/v1/query_range",
+                            params={"query": query, "start": start, "end": end, "limit": limit},
+                            headers=self._headers(), timeout=15, verify=self.verify_ssl)
+        resp.raise_for_status()
+        streams = resp.json().get("data", {}).get("result", []) or []
+        out: List[Dict[str, Any]] = []
+        for s in streams:
+            labels = s.get("stream", {})
+            for ts_ns, line in s.get("values", []):
+                out.append({
+                    "ts": int(ts_ns) / 1e9,
+                    "metric": labels.get("job", labels.get("filename", "")),
+                    "value": line,
+                    "source": "loki",
+                    "raw": {"labels": labels},
+                })
+        return out[:limit]
+
+    def query_metrics(self, promql: str, hours: int = 1) -> Dict[str, Any]:
+        """把 LogQL 当作日志量统计（即时 count_over_time），返回单点时间序列。"""
+        if not self.base_url:
+            return {"mode": "demo", "promql": promql, "series": []}
+        if requests is None:
+            raise RuntimeError("未安装 requests，无法查询 Loki")
+        resp = requests.get(f"{self.base_url}/loki/api/v1/query",
+                            params={"query": promql}, headers=self._headers(),
+                            timeout=15, verify=self.verify_ssl)
+        resp.raise_for_status()
+        data = resp.json().get("data", {}).get("result", []) or []
+        series = []
+        for d in data:
+            val = d.get("value")
+            if val:
+                series.append({"ts": val[0], "value": float(val[1])})
+        return {"mode": "live", "promql": promql, "series": series}
+
+    @staticmethod
+    def _demo_logs(query: str, limit: int) -> List[Dict[str, Any]]:
+        now = int(time.time())
+        samples = [
+            ("error", "connection refused to upstream 10.0.0.5:8080"),
+            ("warn", "high latency detected on cell BTS-07 (RSRP -118)"),
+            ("info", "reconcile loop completed, 12 targets up"),
+            ("error", "TLS handshake failed: certificate expired"),
+            ("warn", "retry budget exhausted for service auth"),
+        ]
+        out = []
+        for i in range(min(limit, len(samples))):
+            lvl, msg = samples[i]
+            out.append({
+                "ts": now - (len(samples) - i) * 60,
+                "metric": query,
+                "value": f"[{lvl.upper()}] {msg}",
+                "source": "loki",
+                "raw": {"labels": {"level": lvl}},
+            })
+        return out
+
+    def healthcheck(self) -> Dict[str, Any]:
+        if not self.base_url:
+            return {"reachable": True, "mode": "demo",
+                    "endpoint": "<loki-url>/loki/api/v1/query_range",
+                    "note": "未配置真实地址，fetch_recent 返回仿真日志；配置 base_url+api_key 后接真实 Loki"}
+        if requests is None:
+            return {"reachable": None, "mode": "live", "note": "未安装 requests"}
+        try:
+            resp = requests.get(f"{self.base_url}/loki/api/v1/labels",
+                                headers=self._headers(), timeout=10, verify=self.verify_ssl)
+            resp.raise_for_status()
+            return {"reachable": True, "mode": "live", "status": resp.status_code}
+        except Exception as e:  # noqa: BLE001
+            return {"reachable": False, "mode": "live", "error": str(e)}

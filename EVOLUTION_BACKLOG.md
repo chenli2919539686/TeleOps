@@ -47,10 +47,13 @@
    - 修隐藏 bug：旧明细表读 `ev.details`（已废弃字段）永远空白 → 改用 `rootcause_details` + `noise_details` 真实渲染。
    - 后端 `eval_closed_loop.py` 产出加 `mttr_minutes: null` + `mttr_note` 显式标记缺口。
    - 剩余：MTTR 真正数值需带时间戳的工单闭环数据（真实 OSS/网管导出补齐后填）。
-3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki）
-   - 架构已预留 `real_adapters.py`，落地较快；让 Agent 拉真实指标做诊断
-4. **SQLite → Postgres**（连接串切换 + 迁移脚本）
-   - `docs/04:28` 数据层已预留 DSN 切换点；建议多 worker 前先做
+3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki） ✅ **已落地（v0.8.40）**
+   - `GrafanaAdapter`（数据源代理）+ `PrometheusAdapter`（直连 `/api/v1/query_range`）+ `LokiLogAdapter`（LogQL `/loki/api/v1/query_range`）三者齐备，均「配置驱动 + demo 兜底」。
+   - 端点：`POST /adapters/metrics-grafana|metrics-prometheus/query`、`POST /adapters/logs-loki|log-elk/logs`。
+   - 测试：`tests/test_adapters_real.py`（Prometheus/Loki demo+live 解析）+ `tests/test_monitoring_endpoints.py`（路由 200/404/400）。详见 `docs/09-接入真实监控系统.md`。
+   - 剩余：Agent 诊断阶段把监控查询做成可调用的工具（pull_metrics/pull_logs）属增强项，非阻塞。
+4. **SQLite → Postgres**（连接串切换 + 迁移脚本） 🔶 **进行中**
+   - `docs/04:28` 数据层已预留 DSN 切换点；建议多 worker 前先做（见下 Phase 2）
 5. **多 worker**（uvicorn `--workers` + Caddy upstream 多目标）
    - **必须先切 Postgres**（SQLite 多进程写有坑，Windows spawn 也坑）；D3 Redis 已打底
 6. **Caddy 多后端**（upstreams 指多副本 + `/health` 探活看 `replica_id`）
