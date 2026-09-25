@@ -15,6 +15,6 @@ redis>=5.0
 # D3 第三步：告警流走队列调度（TELEOPS_STREAM_EXECUTOR=queue）才需要 rq；
 # tests/test_stream_queue.py 用 fakeredis + SimpleWorker 验证入队与真实消费
 rq>=2.0
-# Postgres 真连集成测试（tests/test_db_postgres.py 的 test_pg_schema_and_crud）：
-# 设 TELEOPS_TEST_PG_DSN 指向可达 Postgres 时运行，否则自动 skip。psycopg3 二进制包。
-psycopg[binary]>=3.1
+# Postgres 真连集成测试（tests/test_db_postgres.py 的 test_pg_schema_and_crud）为可选验证：
+# 该测试按 TELEOPS_TEST_PG_DSN 自动 skip，不进强制依赖，避免拖累核心 CI 门禁；
+# 需要时在 CI 测试门 step 内 `pip install "psycopg[binary]>=3.1"` 或本地按需安装。
