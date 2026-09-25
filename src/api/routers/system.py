@@ -4,10 +4,16 @@
 `from src.api import server as s` 引用，保证始终取到当前实例（含热重载后的 tools/kb）。
 """
 import os
+import socket
 import time
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+
+
+# 多副本可观测：每个副本一个稳定标识，运维侧据此区分「请求落在哪个副本」。
+# 默认 hostname:pid（进程级唯一）；部署时可显式注入 TELEOPS_REPLICA_ID（如 k8s pod 名）。
+REPLICA_ID = os.environ.get("TELEOPS_REPLICA_ID") or f"{socket.gethostname()}:{os.getpid()}"
 
 from src.config import DATA_DIR, load_llm_config
 from src.core import db, metrics
@@ -53,9 +59,14 @@ def _register_metrics_gauges():
     metrics.gauge("teleops_workspaces_total", "业务域总数", ws_items)
     metrics.gauge("teleops_agents_total", "Agent 数（按域/状态）", agent_items)
     metrics.gauge("teleops_requirements_total", "需求数（按域/状态）", req_items)
+    # 多副本可观测：每个副本上报一条以 replica_id 为 label、值为1的序列，
+    # 抓取端即可通过 label 数判断当前在线副本数，并区分指标归属。
+    metrics.gauge("teleops_replica_info", "在线副本标识（每副本一条值为1的序列）",
+                 lambda: [({"replica_id": REPLICA_ID}, 1)])
     metrics.set_help("teleops_workspaces_total", "业务域总数")
     metrics.set_help("teleops_agents_total", "Agent 数（按域/状态）")
     metrics.set_help("teleops_requirements_total", "需求数（按域/状态）")
+    metrics.set_help("teleops_replica_info", "在线副本标识（label=replica_id）")
 
 
 @router.get("/api/info")
@@ -63,6 +74,7 @@ def root():
     return {
         "service": "TeleOps 智能体平台",
         "version": s.VERSION,
+        "replica_id": REPLICA_ID,
         "llm_mode": s.llm.mode,
         "dispatch_mode": s.dispatch_mode["value"],
         "rate_limit": "on" if rl.ENABLED else "off",
@@ -98,6 +110,7 @@ def health():
     return {
         "status": "ok",
         "version": s.VERSION,
+        "replica_id": REPLICA_ID,
         "llm_provider": load_llm_config().get("provider", "mock"),
         "llm_mode": s.llm.mode,
         "nodes": len(s.cmdb.all_nodes()),

@@ -154,8 +154,8 @@ class RedisSemaphoreStore(SemaphoreStore):
         self.fail_open = fail_open
         self._client = client
         if self._client is None:
-            import redis  # 延迟导入
-            self._client = redis.Redis.from_url(
+            from .redis_factory import from_url  # 延迟导入
+            self._client = from_url(
                 redis_url or os.environ.get("TELEOPS_REDIS_URL",
                                             "redis://127.0.0.1:6379/0"),
                 decode_responses=True)

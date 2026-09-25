@@ -134,8 +134,8 @@ class RedisStateStore(StateStore):
         self._url = redis_url or os.environ.get(
             "TELEOPS_REDIS_URL", "redis://127.0.0.1:6379/0")
         if self._client is None:
-            import redis  # 延迟导入：只有真正选用 redis 后端才依赖该包
-            self._client = redis.Redis.from_url(self._url, decode_responses=True)
+            from .redis_factory import from_url  # 延迟导入
+            self._client = from_url(self._url, decode_responses=True)
         self._script = self._client.register_script(_SLIDING_WINDOW_LUA)
 
     def _k(self, key: str) -> str:
@@ -288,8 +288,8 @@ class RedisJobStore(JobStore):
         self._ttl = ttl
         self._client = client
         if self._client is None:
-            import redis  # 延迟导入：只有选用 redis 后端才依赖该包
-            self._client = redis.Redis.from_url(
+            from .redis_factory import from_url  # 延迟导入
+            self._client = from_url(
                 redis_url or os.environ.get("TELEOPS_REDIS_URL",
                                             "redis://127.0.0.1:6379/0"),
                 decode_responses=True)

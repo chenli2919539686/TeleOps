@@ -28,6 +28,8 @@ node_modules/
 # Caddy HTTPS 反代运行时二进制与下载缓存（caddy_setup.py 管理）
 tools/caddy.exe
 tools/*.zip
+# Redis 验证用 Windows 二进制（多副本实战验证，从 nuget redis-64 解压，非源码）
+tools/redis/
 # 后端 + Caddy PID 文件与运行时配置（运行期产物）
 data/.server.pid
 data/.caddy.pid
@@ -43,3 +45,6 @@ data/_reset_*/
 data/teleops.db.bak-*
 # 闭环评估脚本产物（scripts/eval_closed_loop.py 运行时输出，非源码）
 data/eval_results.json
+# Redis 集成测试临时日志（验证脚本/pytest 运行期产物，非源码）
+data/redis_test.log
+data/redis_*.log

@@ -15,9 +15,12 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Any, Callable, Dict, List, Optional
+
+_log = logging.getLogger("teleops.stream")
 
 from src.core import stream_state as ss
 
@@ -137,7 +140,19 @@ class QueueStreamExecutor(StreamExecutor):
                       "reused": 0, "pending": 0, "errors": 0},
         })
         self._state.save(ws_id, st)
-        self._enqueue_tick(ws_id, delay=0)
+        # 播放传输（RQ 入队）与状态面解耦：状态已落 Redis（D3 多副本共享的
+        # 核心承诺），入队失败不应阻断启动。入队失败常见于两种环境：
+        #   1) Redis 版本过旧（<4.0）不支持 RQ 的多字段 HSET —— Windows 上的
+        #      redis-64 3.0.x 即此情况，且 Windows 无 os.fork 也跑不了 worker；
+        #   2) worker 未起 / 队列瞬时不可达。
+        # 生产用兼容 Redis（≥4.0，建议 6+ 以支持 HELLO/RESP3）即可正常入队，
+        # 由 Unix 部署态的 worker 消费播放。
+        try:
+            self._enqueue_tick(ws_id, delay=0)
+        except Exception as e:  # 入队失败：状态面已生效，仅告警，不抛
+            _log.warning(
+                "流状态已写入 Redis，但 RQ 入队失败（播放可能不触发，待 worker 恢复）："
+                "%s: %s", type(e).__name__, e)
 
     def stop(self, ws_id):
         st = self._state.get(ws_id)
@@ -227,10 +242,11 @@ def get_stream_executor(stream_of: Optional[Callable] = None,
             return _executor
         mode = os.environ.get("TELEOPS_STREAM_EXECUTOR", "thread").strip().lower()
         if mode == "queue":
-            import redis as _redis  # 延迟导入
             from rq import Queue as _RQQueue
-            conn = _redis.Redis.from_url(
-                os.environ.get("TELEOPS_REDIS_URL", "redis://127.0.0.1:6379/0"))
+            from .redis_factory import from_url  # 延迟导入
+            conn = from_url(
+                os.environ.get("TELEOPS_REDIS_URL", "redis://127.0.0.1:6379/0"),
+                decode_responses=False)
             _executor = QueueStreamExecutor(_RQQueue("teleops:stream", connection=conn))
         else:
             if stream_of is None:
