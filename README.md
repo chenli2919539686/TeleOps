@@ -312,6 +312,19 @@ python app.py
 
 本轮**不做组织级硬隔离**（新增 tenant 表、全链路 tenant 上下文、按租户分密钥）：单服务部署下收益与成本不成比例，且需大改数据模型/API/前端/测试。演进路径（出现多副本或多客户独立运营需求时）：加 `tenant_id` 外键 → 中间件注入 tenant 上下文 + 全部查询强制过滤 → 回归测试 → 前端登录选租户；多副本共享限流计数时把进程内窗口换 Redis。
 
+## 工程成熟度与交付状态（v0.8.51）
+
+> 以下为项目当前最终态的横向收敛，便于面试/验收一眼看清「做到哪、没编造什么」。
+
+- **测试与 CI**：`tests/` 约 282 个测试函数（含参数化节点约 410），覆盖鉴权 / 多租户隔离 / 告警降噪分层 / 闭环派发 / 工具复用 / 审计 / RBAC / 熔断 / 多副本 Redis / 审批外部化等；本地 `pytest` 全绿（无网依赖、临时 DB、离线 Mock）。GitHub Actions 五道守卫（敏感文件 / `ruff` / `compileall` / `node --check` / 全量 `pytest`）在 **py3.11 + py3.13 双矩阵 success**；D3 多副本状态共享 + 审批外部化两套回归守卫已在 CI **真实起 Redis 跑通**（非 skip）。
+- **量化可验证（不编造）**：`src/eval/rootcause_bench.py` 真正接入 `OpsAgent` + 真实 triage 降噪层，造带 `true_root` 标签的合成退化样本（弱覆盖 / 干扰 / 传输丢包 / 拥塞），算**置信度 + 位置双 Top-1** 与**真实噪声抑制率**，并诚实标注 `verify_mode`（offline-stub / live-agent / simulated 修复仿真）；MTTR 因缺真实工单闭环数据显式占位、绝不填假数。
+- **真实数据接入**：5G 小区 KPI 公开数据集（`uccmisl/5Gdataset`）管线打通「KPI → 统一告警 → 运维根因」；华为风格 OSS 样例离线三层验证（列映射 → 统一 Alert → Agent 接线），切真实导出**零代码**（改 `data/adapters.json` 列别名即生效）。
+- **接真实监控系统**：Grafana / Prometheus / Loki 适配器（配置驱动 + demo 兜底），并把 `pull_metrics` / `pull_logs` 注册为 Agent 只读诊断工具，LLM 在根因阶段推荐 PromQL/LogQL 并透传执行。
+- **部署演进**：SQLite→Postgres 方言翻译层（`TELEOPS_DB_DSN` 零代码切换，默认仍零依赖）；`--workers N` 多进程；Caddy 多后端负载均衡与探活；多副本无状态需 `TELEOPS_STATE_STORE=redis`（限流 / 任务 / 流 / 信号量全外移）。`docs/10` 已出百人规模生产部署清单。
+- **安全与治理**：多租户三层隔离（读可见 ≠ 可写）+ 邀请码 + 限流 + Caddy HTTPS + 防火墙白名单 + 操作审计（日志 / 可回放时间线 / CSV 导出 / OSS 归档）+ RBAC 引擎（路由层唯一判定入口 `assert_perm`）+ SSO/OIDC + 人工审批 HITL + **LLM 端点级熔断**（故障域 fail-fast 降级 Mock，避免告警流「假死」）。
+- **合规与主权**：等保级别判断框架、数据出域风险、模型私有化（改 `TELEOPS_LLM_BASE_URL` 零代码）、信创适配与分阶段路线图（`docs/11`）。
+- **演示与验收**：`scripts/demo.py` 一条命令拉起（起后端 → 注册 → 进个人域 → 启 5G 告警流 → 开浏览器）；`docs/12` 一键演示走查；`docs/13` 方法论验收（ADR×10 / RACI / 风险登记册 / 数据字典 / 三环境策略 / 质量门 / 验收清单），专为求职验收与面试讲述收敛。
+
 ## 文档导航
 
 - `docs/01-技术选型与架构.md`：技术栈全景、五层架构、模块职责、可替换性设计。
