@@ -18,10 +18,16 @@ from src.core import settings
 
 
 def _isolate(tmp_path, monkeypatch):
-    """把审批单与运行时设置重定向到临时目录，并清空内存态。"""
+    """把审批单与运行时设置重定向到临时目录，并强制本地存储后端（隔离 Redis 配置污染）。
+
+    显式 configure 为本地后端，确保即便同进程其它测试注入了 Redis 后端，这里的断言
+    仍走 data/<tmp> 落盘（与改造前行为一致），绝不污染仓库 data/。
+    """
     monkeypatch.setattr(approvals, "DATA_FILE", tmp_path / "approvals.json")
     monkeypatch.setattr(approvals, "_state", {"items": []})
     monkeypatch.setattr(settings, "SETTINGS_FILE", tmp_path / "settings.json")
+    approvals.configure_approval_store(approvals.LocalApprovalStore())
+    settings.configure_settings_store(settings.LocalSettingsStore())
 
 
 def test_store_crud(tmp_path, monkeypatch):

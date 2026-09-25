@@ -67,8 +67,8 @@
      `TELEOPS_BACKENDS` 指各副本，Caddy 自动负载均衡 + 剔除不健康节点。详见 `docs/06` §8。
 
 ## 联动提醒
-- 真·多副本投产时，HITL 审批单 / `data/settings.json` 是**本地 JSON 不跨副本**，
-  需接 `docs/06` 的 Redis 外部化（本期未做）。
+- HITL 审批单 / 运行时设置（`require_approval` 开关）的跨副本外部化**已在 v0.8.44 落地**
+  （`TELEOPS_STATE_STORE=redis` 即落 Redis，详见 `docs/06` §8.4）。单机部署默认仍是本地 JSON，零依赖。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
 
 ## 下一步候选（等用户拍板）
