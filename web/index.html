@@ -285,10 +285,11 @@
       <section class="view" id="view-approvals">
         <header class="view-head">
           <h1>✅ 审批队列 · 人工闸（HITL）</h1>
-          <p>开启 <code>TELEOPS_REQUIRE_APPROVAL=1</code> 后，研发造工具等高风险动作不再直接执行，而是落此待管理员批准。当前状态：<b id="aprMode">—</b>。批准后即真正执行（tool.build 会跑研发造工具）。</p>
+          <p>开启人工审批闸后，研发造工具、启动告警流等高风险动作不再直接执行，而是落此待管理员批准（HITL 企业级护栏）。当前状态：<b id="aprMode">—</b>。管理员可点右侧按钮运行时切换并持久化；批准后即真正执行（tool.build 跑研发造工具、stream.start 真正启动告警流）。</p>
         </header>
         <div class="metrics-actions">
           <button class="ghost-btn" id="aprRefresh">🔄 刷新</button>
+          <button class="primary-btn" id="aprToggle">⚙️ 切换人工审批闸</button>
         </div>
         <div class="apr-list" id="aprList">
           <div class="empty">暂无审批单。</div>
@@ -578,6 +579,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.23"></script>
+  <script src="app.js?v=0.8.35"></script>
 </body>
 </html>

@@ -36,6 +36,9 @@ data/.caddy.pid
 data/.caddy.Caddyfile
 # JWT 注销黑名单（运行期持久化，含 jti，非源码）
 data/jwt_revoked.json
+# 人工审批单与运行时设置持久化（运行期产物，非源码）
+data/approvals.json
+data/settings.json
 # 运行期日志（后端 / Caddy 输出）
 data/caddy.log
 data/teleops_server.log

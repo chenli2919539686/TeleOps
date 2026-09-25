@@ -56,6 +56,7 @@ from src.core import db
 from src.core import auth
 from src.core import metrics
 from src.core import approvals
+from src.core import settings
 from src.core import rate_limit as rl
 from src.core import usage
 from src.core.alert_stream import AlertStream, build_playlist
@@ -74,7 +75,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.34"
+VERSION = "0.8.35"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -83,7 +84,9 @@ INVITE_CODE = os.environ.get("TELEOPS_INVITE_CODE", "").strip()
 
 # 人工审批闸（HITL）：TELEOPS_REQUIRE_APPROVAL=1 时，研发造工具等高风险动作
 # 不再直接执行，而是落 pending 审批单，由管理员批准后才真正执行（企业级安全护栏）。
-REQUIRE_APPROVAL = os.environ.get("TELEOPS_REQUIRE_APPROVAL", "").strip() in ("1", "true", "True")
+# 运行时取值：settings.get_require_approval() 文件优先 + env 兜底（admin 可经
+# POST /settings/require-approval 运行时切换并持久化，无需重启）。
+REQUIRE_APPROVAL = settings.get_require_approval()
 
 # ---------------- 安全：CORS 白名单（取代原先的 allow_origins=["*"]） ----------------
 # 默认仅放行本地前端（8001）；生产/Spaces 部署请通过 TELEOPS_CORS_ORIGINS 显式放行域名，
@@ -918,42 +921,34 @@ def _run_agent_build(agent_id: str, feedback: Dict[str, Any]) -> Dict[str, Any]:
         registry.set_status(agent_id, "idle")
 
 
+def _run_stream_start(p: Dict[str, Any]) -> bool:
+    """审批通过后真正启动告警流（与 stream_start 端点逻辑一致，去除权限/网关）。"""
+    ws_id = p.get("workspace_id")
+    data = load_alerts()
+    playlist = build_playlist(data.get("alerts", []), profile=p.get("profile", "mixed"))
+    if not playlist:
+        raise HTTPException(status_code=400, detail="剧本为空，请检查 data/alerts.json")
+    ops_id, mode = _stream_resolve_ctx(ws_id, p.get("ops_agent_id"), p.get("mode"))
+    with _stream_op_lock:
+        if stream_executor.is_running(ws_id):
+            raise HTTPException(status_code=409,
+                                detail="该业务域的告警流已在运行，请先停止再启动")
+        stream_executor.start(
+            ws_id, playlist,
+            process=_stream_make_processor(ws_id, ops_id, mode,
+                                           route_by_alert=p.get("ops_agent_id") is None),
+            profile=p.get("profile", "mixed"), interval_ms=p.get("interval_ms"),
+            loop=p.get("loop"), ops_agent_id=ops_id, mode=mode,
+            started_by=p.get("started_by") or "审批后启动")
+    return True
+
+
+
 def _audit_write_dummy(action, ws_id, detail):
     """无 request 上下文时写审计（审批异步执行用）。"""
     db.audit("system(hitl)", action, workspace_id=ws_id, detail=detail, result="ok",
              actor_id=None, ip="internal")
 
-
-def agent_build(agent_id: str, req: FeedbackReq, request: Request):
-    """研发 Agent 工作台：运行该 Agent 的造工具流程（job 化，状态灯实时联动）。
-
-    企业级人工闸：开启 TELEOPS_REQUIRE_APPROVAL 时，高风险动作不直接执行，
-    而是落 pending 审批单，由管理员批准后才真正执行（HITL）。
-    """
-    a = registry.get(agent_id)
-    if not a:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} 不存在")
-    if a["kind"] != "dev":
-        raise HTTPException(status_code=400, detail=f"{agent_id} 不是研发 Agent")
-    feedback = {"feedback_id": req.feedback_id, "summary": req.summary}
-
-    if REQUIRE_APPROVAL:
-        actor, _ = _actor_of(request)
-        apr_id = approvals.create(
-            subject="tool.build", requested_by=actor,
-            payload={"agent_id": agent_id, "feedback": feedback},
-            detail={"agent": agent_id, "feedback": req.feedback_id,
-                    "summary": (req.summary or "")[:120]})
-        _audit_write(request, "tool.build", a.get("workspace_id"),
-                     {"agent": agent_id, "pending": apr_id}, result="pending")
-        return {"job_id": None, "status": "pending_approval", "approval_id": apr_id,
-                "note": "已提交人工审批，管理员批准后才会真正造工具"}
-
-    def flow():
-        _run_agent_build(agent_id, feedback)
-
-    job_id = _start_job(flow)
-    return {"job_id": job_id, "status": "running"}
 
 
 # ---------------- 外部系统适配器（接入层 / 北向感知 + 南向执行） ----------------
@@ -1029,7 +1024,7 @@ def list_approvals(request: Request, status: Optional[str] = None):
     actor, _ = _actor_of(request)
     items = approvals.list_items(status=status, uid=(None if user.get("is_admin") else actor))
     return {"items": items, "total": len(items),
-            "require_approval": REQUIRE_APPROVAL}
+            "require_approval": settings.get_require_approval()}
 
 
 @app.post("/approvals/{apr_id}/approve")
@@ -1044,14 +1039,23 @@ def approve_apr(apr_id: str, req: ApprovalDecisionReq, request: Request):
     decided = approvals.decide(apr_id, "approved", user.get("sub"))
     _audit_write(request, "approval.approve", item.get("payload", {}).get("workspace_id"),
                  {"approval_id": apr_id, "subject": item["subject"], "note": req.note})
-    # 批准即执行：目前仅 tool.build 需要真正落地
+    # 批准即执行：tool.build 真正造工具；stream.start 真正启动告警流（HITL 闭环）。
+    executed = False
     if item["subject"] == "tool.build" and item.get("payload"):
         try:
             _run_agent_build(item["payload"]["agent_id"], item["payload"]["feedback"])
+            executed = True
         except Exception as e:  # noqa: BLE001
             decided = approvals.decide(apr_id, "approved_failed", user.get("sub"))
             return {"approval": decided, "executed": False, "error": str(e)}
-    return {"approval": decided, "executed": item["subject"] == "tool.build"}
+    elif item["subject"] == "stream.start" and item.get("payload"):
+        try:
+            _run_stream_start(item["payload"])
+            executed = True
+        except Exception as e:  # noqa: BLE001
+            decided = approvals.decide(apr_id, "approved_failed", user.get("sub"))
+            return {"approval": decided, "executed": False, "error": str(e)}
+    return {"approval": decided, "executed": executed}
 
 
 @app.post("/approvals/{apr_id}/reject")
@@ -1067,6 +1071,25 @@ def reject_apr(apr_id: str, req: ApprovalDecisionReq, request: Request):
     _audit_write(request, "approval.reject", item.get("payload", {}).get("workspace_id"),
                  {"approval_id": apr_id, "subject": item["subject"], "note": req.note})
     return {"approval": decided}
+
+
+# ---------------- 运行时设置（admin 可配置，持久化） ----------------
+class RequireApprovalReq(BaseModel):
+    enabled: bool
+
+
+@app.post("/settings/require-approval")
+def set_require_approval_endpoint(req: RequireApprovalReq, request: Request):
+    """管理员运行时切换人工审批闸（HITL 总开关），写入 data/settings.json 持久化。
+
+    与部署期 env TELEOPS_REQUIRE_APPROVAL 二选一：文件值优先；此端点即「admin 可配置」。
+    """
+    user = getattr(request.state, "user", None)
+    if not user or not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="仅管理员可配置")
+    settings.set_require_approval(req.enabled)
+    _audit_write(request, "settings.require_approval", None, {"enabled": req.enabled})
+    return {"require_approval": settings.get_require_approval()}
 
 
 # ---------------- 量化指标看板（P0② / P2⑥） ----------------
@@ -1224,6 +1247,7 @@ ctx.board = board
 ctx.db = db
 ctx.dispatch_mod = dispatch_mod
 ctx.REQUIRE_APPROVAL = REQUIRE_APPROVAL
+ctx.get_require_approval = settings.get_require_approval
 ctx.approvals = approvals
 ctx._streams = _streams
 ctx._streams_lock = _streams_lock
@@ -1257,6 +1281,7 @@ stream_executor = get_stream_executor(_stream_of, streams=_streams)
 ctx.stream_executor = stream_executor
 ctx._stream_key_visible = _stream_key_visible
 ctx._audit_write = _audit_write
+ctx._actor_of = _actor_of
 ctx._resolve_alert_obj = _resolve_alert_obj
 ctx._raise_flow = _raise_flow
 ctx._reload_all = _reload_all

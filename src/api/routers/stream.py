@@ -25,6 +25,7 @@ def stream_start(req: StreamStartReq, request: Request):
             req.workspace_id, getattr(request.state, "user", None)):
         raise HTTPException(status_code=404, detail="业务域不存在")
     user = getattr(request.state, "user", None)
+    started_by = ((user or {}).get("username") or (user or {}).get("sub") or "匿名")
     if req.workspace_id and not s.ws_store.is_writable_by(req.workspace_id, user):
         s._audit_write(request, "stream.start", req.workspace_id,
                      {"profile": req.profile, "mode": req.mode}, result="denied")
@@ -35,6 +36,24 @@ def stream_start(req: StreamStartReq, request: Request):
         raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
     if req.mode and req.mode not in ("auto", "manual"):
         raise HTTPException(status_code=400, detail="mode 必须为 auto 或 manual")
+    # 人工审批闸（HITL）：开启时高风险动作不直接执行，落 pending 审批单，
+    # 由管理员批准后才真正启动（与 tool.build 同一套审批管线）。
+    if s.get_require_approval():
+        actor, _ = s._actor_of(request)
+        apr_id = s.approvals.create(
+            subject="stream.start", requested_by=actor,
+            payload={"workspace_id": req.workspace_id, "profile": req.profile,
+                     "mode": req.mode, "ops_agent_id": req.ops_agent_id,
+                     "interval_ms": req.interval_ms, "loop": req.loop,
+                     "started_by": started_by},
+            detail={"workspace_id": req.workspace_id, "profile": req.profile,
+                    "mode": req.mode, "started_by": started_by})
+        s._audit_write(request, "stream.start", req.workspace_id,
+                       {"profile": req.profile, "mode": req.mode, "pending": apr_id},
+                       result="pending")
+        return {"status": "pending_approval", "approval_id": apr_id,
+                "note": "已提交人工审批，管理员批准后才会真正启动告警流",
+                "workspace_id": req.workspace_id}
     data = s.load_alerts()
     playlist = s.build_playlist(data.get("alerts", []), profile=req.profile)
     if not playlist:
@@ -57,8 +76,6 @@ def stream_start(req: StreamStartReq, request: Request):
         # D3 修复：早期签发的 token 里只有标准声明 sub、没有 username，
         # 导致已登录用户的流水线被记成"由 匿名 启动"。按 username → sub 顺序取，
         # 兼容新旧 token（auth.issue_token 现已同时写入两个字段）。
-        started_by = ((user or {}).get("username")
-                      or (user or {}).get("sub") or "匿名")
         s.stream_executor.start(
             req.workspace_id, playlist,
             process=s._stream_make_processor(req.workspace_id, ops_id, mode,

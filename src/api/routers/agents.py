@@ -113,11 +113,24 @@ def agent_diagnose(agent_id: str, req: AlertReq):
 
 
 @router.post("/agents/{agent_id}/build")
-def build_agent(agent_id: str, feedback: Dict[str, Any]):
+def build_agent(agent_id: str, feedback: Dict[str, Any], request: Request):
     """研发 Agent 工作台：运行该 Agent 的造工具流程（job 化，状态灯实时联动）。
 
-    实际执行逻辑在 server._run_agent_build（与审批批准共用），此处仅做路由装配。
+    企业级人工闸（HITL）：开启 require_approval 时，高风险动作不直接执行，而是落
+    pending 审批单，由管理员批准后才真正执行（与 stream.start 同一套审批管线）。
+    实际执行逻辑在 server._run_agent_build（与审批批准共用）。
     """
+    if s.get_require_approval():
+        actor, _ = s._actor_of(request)
+        apr_id = s.approvals.create(
+            subject="tool.build", requested_by=actor,
+            payload={"agent_id": agent_id, "feedback": feedback},
+            detail={"agent": agent_id, "feedback": feedback.get("feedback_id"),
+                    "summary": (feedback.get("summary") or "")[:120]})
+        s._audit_write(request, "tool.build", None,
+                       {"agent": agent_id, "pending": apr_id}, result="pending")
+        return {"job_id": None, "status": "pending_approval", "approval_id": apr_id,
+                "note": "已提交人工审批，管理员批准后才会真正造工具"}
     return s._run_agent_build(agent_id, feedback)
 
 

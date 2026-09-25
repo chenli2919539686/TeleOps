@@ -884,7 +884,21 @@ async function renderApprovals() {
   if (!USER) { list.innerHTML = '<div class="empty">请先登录</div>'; return; }
   try {
     const d = await apiFetch("/approvals").then(r => r.json());
-    if (mode) mode.textContent = d.require_approval ? "已开启（高风险动作需审批）" : "未开启（设 TELEOPS_REQUIRE_APPROVAL=1 启用）";
+    if (mode) mode.textContent = d.require_approval ? "已开启（高风险动作需审批）" : "未开启";
+    const toggleBtn = $("#aprToggle");
+    if (toggleBtn) {
+      toggleBtn.style.display = (USER && USER.is_admin) ? "" : "none";
+      toggleBtn.onclick = async () => {
+        try {
+          const r = await apiFetch("/settings/require-approval", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: !d.require_approval }),
+          });
+          if (r.ok) renderApprovals();
+          else alert("切换失败：" + (await r.text()));
+        } catch (e) { alert("切换失败：" + e.message); }
+      };
+    }
     const items = d.items || [];
     if (!items.length) { list.innerHTML = '<div class="empty">暂无审批单。</div>'; return; }
     list.innerHTML = items.map((it) => {
