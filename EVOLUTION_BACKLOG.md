@@ -31,11 +31,15 @@
    - ✅ 数据源已定 `uccmisl/5Gdataset` 并打通「真实 KPI → 根因」管线（v0.8.37）。
    - ✅ **① 量化评估基准** 已落地（v0.8.38，见下「已收工」）。
    - ② **OSS 导出高保真源**：等用户给一份真实 OSS/网管导出（小区级 KPI+告警+拓扑）。
-     **切源能力已就绪（零代码）**：`FiveGKpiAdapter` 支持 `data/adapters.json[alert-5g].column_aliases`
+     **切源能力已就绪且已离线验证（零代码）**：`FiveGKpiAdapter` 支持 `data/adapters.json[alert-5g].column_aliases`
      运行时覆盖列名映射（华为/中兴/爱立信列名差异），`fiveg_dataset.load_payloads` 已透传；
      模板示例见 `data/adapters.example.json` 的 `_oss_example`（含期望 schema + 别名映射样例）。
-     **剩余动作**：用户给导出文件（CSV）→ 在 `alert-5g` 填 `dataset_path` + `column_aliases` 即切源；
-     若导出为 Excel 再补 loader 的 xlsx 支持。测试 `test_fiveg_oss_column_aliases_override` 锁死该行为。
+     **已附样例与验证**：`samples/oss_sample_huawei.csv`（华为风格样例，3 小区×5 时点 + 2 噪声小区，覆盖
+     弱覆盖/干扰/传输丢包/拥塞四类退化）、`scripts/validate_oss_sample.py`（离线三层验证：列映射→统一
+     Alert、噪声抑制、Agent 接线冒烟，断言全绿）、测试 `test_fiveg_oss_column_aliases_override` 与
+     `test_fiveg_oss_sample_csv_end_to_end` 锁死该行为。
+     **剩余动作**：用户给真实导出文件（CSV）→ 在 `alert-5g` 填 `dataset_path` + `column_aliases` 即切源；
+     若导出为 Excel 再补 loader 的 xlsx 支持。
 2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）
    - 依赖真实数据先有；前端大屏加统计卡片（对齐 TelcoNet 的可量化说服力）。
 3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki）

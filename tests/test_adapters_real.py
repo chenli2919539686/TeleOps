@@ -292,3 +292,28 @@ def test_fiveg_oss_column_aliases_override(tmp_path):
     assert alerts[0]["ts"] == "2026-09-25T13:40:00Z"
     # healthcheck 抽样同样走别名（dataset 模式）
     assert adp.healthcheck()["mode"] == "dataset"
+
+
+def test_fiveg_oss_sample_csv_end_to_end():
+    """已提交的华为风格样例（samples/oss_sample_huawei.csv）经别名接入，
+    落地产出规范统一 Alert：证明零代码切源脚手架真实可用（防样例被改坏）。"""
+    from pathlib import Path
+    sample = Path(__file__).resolve().parents[1] / "samples" / "oss_sample_huawei.csv"
+    assert sample.exists(), "样例 fixture 缺失"
+    aliases = {
+        "time": "Timestamp", "enodeb id": "CellID", "lte_rsrp": "RSRP",
+        "lte_rsrq": "RSRQ", "dl_throughput": "DL_bitrate", "ul_throughput": "UL_bitrate",
+    }
+    cfg = {"dataset_path": str(sample), "min_severity": "major", "column_aliases": aliases}
+    adp = FiveGKpiAdapter(cfg)
+
+    major = adp.load_dataset_alerts(min_severity="major")
+    info = adp.load_dataset_alerts(min_severity="info")
+    hosts = {a["host"] for a in major}
+
+    assert len(major) == 14                 # 4 类退化的 major+ 告警
+    assert hosts == {"101-1", "102-1", "103-1"}
+    assert not any(a["host"] == "unknown-cell" for a in major)   # 别名生效
+    assert {a["host"] for a in info} == {"101-1", "102-1", "103-1", "104-1", "105-1"}  # 噪声小区 info 下被识别
+    assert (len(info) - len(major)) == 4    # warning 级噪声被 major 下限抑制
+    assert all(a["ts"].endswith("Z") for a in major)  # 时间戳规整
