@@ -780,6 +780,37 @@ $("#auditLimit").onchange = () => renderAudit();
 $("#auditReplay").onclick = () => auditReplay();
 $("#auditPlay").onclick = () => auditReplayToggle();
 $("#auditSpeed").onchange = () => auditReplaySpeed();
+$("#auditExport").onclick = () => auditExport();
+
+// 导出当前筛选条件下的全部审计记录为 CSV（后端 /audit/export 复用同一套多租户隔离）
+async function auditExport() {
+  if (!USER) { alert("请先登录后再导出审计日志"); return; }
+  const wsId = ($("#auditWs") || {}).value || "";
+  const since = ($("#auditSince") || {}).value || "";
+  const until = ($("#auditUntil") || {}).value || "";
+  const qs = (wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : "") +
+             (since ? `&since=${encodeURIComponent(since.replace("T", " "))}` : "") +
+             (until ? `&until=${encodeURIComponent(until.replace("T", " "))}` : "");
+  const btn = $("#auditExport");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "⏳ 导出中…";
+  try {
+    const r = await apiFetch(`/audit/export?format=csv${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    a.download = `teleops-audit-${stamp}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("审计导出失败：" + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
 
 // ---------------- 可回放审计时间线（像看录像带一样重现操作） ----------------
 // 用 GET /audit/timeline（正序）+ 密度分桶 + 摘要，前端按时间顺序逐条高亮播放，

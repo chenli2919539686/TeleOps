@@ -8,16 +8,23 @@
 - GET /audit/timeline 正序时间线（"回放"用：像看录像带一样按时间顺序重现操作，
                        并附密度分桶 + 摘要统计，便于快速定位异常时段）
 """
+import csv
 import datetime
+import io
 import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 from src.core import db
 from src.api.context import ctx as s
 
 router = APIRouter()
+
+# 审计 CSV 列顺序（detail 为 JSON 字符串原样落库，导出时按字符串写入）
+CSV_COLUMNS = ["id", "ts", "actor", "actor_id", "action",
+               "workspace_id", "detail", "result", "ip"]
 
 
 def _base_where(user: dict):
@@ -215,3 +222,79 @@ def audit_timeline(request: Request, limit: int = 500, offset: int = 0,
         "range": {"since": since, "until": until},
         "bucket": bucket,
     }
+
+
+def _csv_cell(value) -> str:
+    """CSV 单元格标准化：None→空串，其余转字符串（detail 已是 JSON 串原样导出）。"""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _iter_csv(rows):
+    """流式生成 CSV：首块带 UTF-8 BOM（Excel 直接打开不乱码），随后逐行写出。"""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(CSV_COLUMNS)
+    yield "\ufeff" + buf.getvalue()
+    for r in rows:
+        d = dict(r)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow([_csv_cell(d.get(c)) for c in CSV_COLUMNS])
+        yield buf.getvalue()
+
+
+@router.get("/audit/export")
+def export_audit(request: Request,
+                 format: str = "csv",
+                 workspace_id: Optional[str] = None,
+                 actor: Optional[str] = None,
+                 action_prefix: Optional[str] = None,
+                 since: Optional[str] = None, until: Optional[str] = None):
+    """导出审计日志（多租户问责）：按当前筛选条件导出「全部匹配记录」，不做分页截断。
+
+    与 /audit、/audit/timeline 共用同一套隔离与过滤逻辑（_base_where + _apply_filters），
+    保证「看得到的才能导出」，绝不越权泄露他人业务域记录。
+
+    - format=csv（默认）：UTF-8（含 BOM）CSV，浏览器触发文件下载；
+      列：id, ts, actor, actor_id, action, workspace_id, detail, result, ip。
+    - format=json：返回相同记录数组（便于程序化消费）。
+    - 隔离规则、过滤参数（workspace_id/actor/action_prefix/since/until）与 /audit 完全一致。
+    - 零外部依赖、零配置，开箱即用（契合项目「配置驱动 + 零依赖可演示」哲学）。
+
+    说明：审计导出不需要外部对象存储——直接经 HTTP 流式落盘到本机，是纯本地能力；
+    若后续要做「导出到 OSS」，那是另一条独立线（同一套筛选 SQL 复用即可）。
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="需要登录才能导出审计日志")
+
+    if workspace_id:
+        if not s.ws_store.is_visible_to(workspace_id, user):
+            raise HTTPException(status_code=404, detail="业务域不存在")
+        where, params = "WHERE workspace_id=?", [workspace_id]
+    else:
+        where, params = _base_where(user)
+
+    where, params = _apply_filters(
+        where, params, actor=actor, action_prefix=action_prefix,
+        since=since, until=until)
+
+    # 导出不受列表分页限制：取全部匹配（按 id 正序，时间自然序）
+    rows = db.query(
+        f"SELECT * FROM audit_log {where} ORDER BY id ASC", tuple(params))
+
+    if format == "json":
+        return Response(
+            content=json.dumps([dict(r) for r in rows], ensure_ascii=False, default=str),
+            media_type="application/json")
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    headers = {
+        "Content-Disposition": f'attachment; filename="teleops-audit-{stamp}.csv"',
+    }
+    return StreamingResponse(
+        _iter_csv(rows), media_type="text/csv; charset=utf-8", headers=headers)

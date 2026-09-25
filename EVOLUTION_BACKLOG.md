@@ -73,9 +73,12 @@
   前端审计大屏升级为可回放时间线（密度轴 + 变速播放 + 暂停/继续 + 点击柱缩放），隔离规则与 `/audit` 一致。
 - **SSO / OIDC 单点登录已在 v0.8.46 落地**：配置驱动 + mock 兜底，零外部依赖可演示（dev mock 无 IdP 可跑通，
   配 `TELEOPS_OIDC_ISSUER` 走真实 Authorization Code 流）。详见 `docs/04` 第 P2.5 条与 `src/core/oidc.py`。
+- **审计 CSV 导出已在 v0.8.47 落地**：`GET /audit/export`（`format=csv/json`），复用 `/audit` 同一套多租户隔离与
+  过滤（`_base_where` + `_apply_filters`），保证「看得到的才能导出」；UTF-8 BOM CSV，按当前筛选导出全部匹配记录，
+  零外部依赖。前端审计大屏加「⬇ 导出 CSV」按钮（`fetch+blob` 下载，`apiFetch` 自动带 JWT）。详见 `docs/04` 第 8 条。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
 
 ## 下一步候选（等用户拍板）
-- 剩余非阻塞增强：
-  - **审计日志导出 CSV**（可回放时间线已做，导出为可选补充）。
+- 剩余非阻塞增强（均已无代码阻塞，纯等时机）：
+  - **真实 OSS 归档导出**（另一条独立线，与 OIDC/审计导出同一「配置驱动 + mock 兜底」哲学；用户给目标即接）。
 - 价值最高的外部数据阻塞项仍是：**真实 OSS/网管导出源**（卡用户给文件，零代码切源）+ **MTTR 真·数值**（卡真实工单闭环数据）。
