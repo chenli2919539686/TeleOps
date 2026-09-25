@@ -714,7 +714,10 @@ function syncAuditWsOptions() {
 }
 
 async function renderAudit() {
+  auditReplayStop();
   const body = $("#auditBody"), empty = $("#auditEmpty"), scope = $("#auditScope");
+  const tl = $("#auditTimeline");
+  if (tl) tl.style.display = "none";   // 普通列表视图隐藏回放密度轴
   if (!body) return;
   if (!USER) {
     body.innerHTML = "";
@@ -736,20 +739,7 @@ async function renderAudit() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const d = await r.json();
     const items = d.items || [];
-    body.innerHTML = items.map((it) => {
-      const label = AUDIT_LABEL[it.action] || "";
-      return `<tr>
-        <td>${escapeHtml(String(it.ts || "").replace("T", " "))}</td>
-        <td>${escapeHtml(it.actor || "—")}</td>
-        <td><span class="audit-action">${escapeHtml(it.action || "")}</span>${
-          label ? `<div class="audit-sub">${escapeHtml(label)}</div>` : ""}</td>
-        <td>${escapeHtml(auditWsName(it.workspace_id))}</td>
-        <td class="audit-detail">${escapeHtml(it.detail || "")}</td>
-        <td><span class="audit-result ${escapeHtml(it.result || "ok")}">${
-          escapeHtml(it.result || "ok")}</span></td>
-        <td>${escapeHtml(it.ip || "—")}</td>
-      </tr>`;
-    }).join("");
+    body.innerHTML = items.map(auditRowHtml).join("");
     if (empty) {
       empty.style.display = items.length ? "none" : "";
       if (!items.length) empty.textContent = "暂无审计记录";
@@ -765,33 +755,183 @@ async function renderAudit() {
   }
 }
 
+function auditRowHtml(it) {
+  const label = AUDIT_LABEL[it.action] || "";
+  const detail = (it.detail && typeof it.detail === "object")
+    ? escapeHtml(JSON.stringify(it.detail)) : escapeHtml(it.detail || "");
+  return `<tr data-ts="${escapeHtml(it.ts || "")}">
+    <td>${escapeHtml(String(it.ts || "").replace("T", " "))}</td>
+    <td>${escapeHtml(it.actor || "—")}</td>
+    <td><span class="audit-action">${escapeHtml(it.action || "")}</span>${
+      label ? `<div class="audit-sub">${escapeHtml(label)}</div>` : ""}</td>
+    <td>${escapeHtml(auditWsName(it.workspace_id))}</td>
+    <td class="audit-detail">${detail}</td>
+    <td><span class="audit-result ${escapeHtml(it.result || "ok")}">${
+      escapeHtml(it.result || "ok")}</span></td>
+    <td>${escapeHtml(it.ip || "—")}</td>
+  </tr>`;
+}
+
 $("#auditRefresh").onclick = () => renderAudit();
 $("#auditWs").onchange = () => renderAudit();
 $("#auditLimit").onchange = () => renderAudit();
 $("#auditReplay").onclick = () => auditReplay();
+$("#auditPlay").onclick = () => auditReplayToggle();
+$("#auditSpeed").onchange = () => auditReplaySpeed();
 
-// 审计回放：按时间范围拉取记录，逐步高亮播放（像看录像带）
-let _replayTimer = null;
+// ---------------- 可回放审计时间线（像看录像带一样重现操作） ----------------
+// 用 GET /audit/timeline（正序）+ 密度分桶 + 摘要，前端按时间顺序逐条高亮播放，
+// 支持变速、暂停/继续、点击密度柱缩放该时段。
+let _replay = { timer: null, items: [], idx: 0, playing: false, speed: 1 };
+
+function auditReplayStop() {
+  if (_replay.timer) { clearInterval(_replay.timer); _replay.timer = null; }
+  _replay.playing = false;
+  const pb = $("#auditPlay");
+  if (pb) { pb.disabled = true; pb.textContent = "⏸ 暂停"; }
+  const st = $("#auditReplayStat");
+  if (st) st.textContent = "";
+}
+
+function auditReplaySpeed() {
+  const v = parseFloat(($("#auditSpeed") || {}).value || "1");
+  _replay.speed = isNaN(v) ? 1 : v;
+  if (_replay.playing) auditReplayResume(true);   // 重启计时器以应用新速度，保留进度
+}
+
+function auditReplayResume(restart) {
+  const body = $("#auditBody");
+  if (!body) return;
+  const rows = Array.from(body.querySelectorAll("tr"));
+  if (_replay.idx >= rows.length) { auditReplayStop(); return; }
+  _replay.playing = true;
+  const pb = $("#auditPlay");
+  if (pb) { pb.disabled = false; pb.textContent = "⏸ 暂停"; }
+  if (_replay.timer && !restart) return;
+  if (_replay.timer) { clearInterval(_replay.timer); _replay.timer = null; }
+  const interval = Math.max(120, 700 / _replay.speed);
+  _replay.timer = setInterval(() => {
+    if (_replay.idx > 0) {
+      const prev = rows[_replay.idx - 1];
+      if (prev) prev.classList.remove("replay-hl");
+    }
+    if (_replay.idx >= rows.length) { auditReplayStop(); return; }
+    const tr = rows[_replay.idx];
+    if (tr) { tr.classList.add("replay-hl"); tr.scrollIntoView({ block: "center", behavior: "smooth" }); }
+    _replay.idx++;
+    const st = $("#auditReplayStat");
+    if (st) st.textContent = `回放中 ${_replay.idx}/${rows.length}`;
+  }, interval);
+}
+
+function auditReplayToggle() {
+  if (!_replay.items.length) { auditReplay(); return; }
+  if (_replay.playing) {
+    _replay.playing = false;
+    if (_replay.timer) { clearInterval(_replay.timer); _replay.timer = null; }
+    const pb = $("#auditPlay");
+    if (pb) pb.textContent = "▶ 继续";
+  } else {
+    auditReplayResume(false);
+  }
+}
+
+function chooseBucket(since, until) {
+  try {
+    const u = until ? new Date(until) : new Date();
+    const s = since ? new Date(since) : new Date(u.getTime() - 24 * 3600 * 1000);
+    const spanH = (u - s) / 3600000;
+    if (spanH <= 2) return "minute";
+    if (spanH <= 48) return "hour";
+    return "day";
+  } catch (e) {
+    return "hour";
+  }
+}
+
+function renderTimeline(buckets) {
+  const tl = $("#auditTimeline");
+  if (!tl) return;
+  if (!buckets || !buckets.length) {
+    tl.innerHTML = '<div class="tl-empty">该范围内无审计记录，或时间跨度太小无需分桶</div>';
+    tl.style.display = "flex";
+    return;
+  }
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  tl.innerHTML = buckets.map((b) => {
+    const h = Math.max(6, Math.round((b.count / max) * 64));
+    const res = b.by_result || {};
+    const bad = (res.denied || 0) + (res.error || 0);
+    const ratio = b.count ? bad / b.count : 0;
+    const base = ratio > 0
+      ? (res.error > res.denied ? "var(--warn)" : "var(--coral)")
+      : "var(--primary-2)";
+    const op = (0.35 + 0.6 * (b.count / max)).toFixed(2);
+    return `<div class="tl-bar" data-t="${encodeURIComponent(b.t)}" ` +
+      `title="${b.t}\n共 ${b.count} 条 (ok ${res.ok || 0} / denied ${res.denied || 0} / error ${res.error || 0})" ` +
+      `style="height:${h}px;background:${base};opacity:${op}"></div>`;
+  }).join("");
+  tl.querySelectorAll(".tl-bar").forEach((el) => { el.onclick = () => jumpToBucket(el.dataset.t); });
+  tl.style.display = "flex";
+}
+
+function jumpToBucket(tEnc) {
+  try {
+    const t = new Date(decodeURIComponent(tEnc));
+    const sinceInput = $("#auditSince"), untilInput = $("#auditUntil");
+    if (!sinceInput || !untilInput) return;
+    const bucket = ($("#auditTimeline").dataset.bucket) || "hour";
+    let end;
+    if (bucket === "minute") end = new Date(t.getTime() + 60 * 1000);
+    else if (bucket === "hour") end = new Date(t.getTime() + 3600 * 1000);
+    else end = new Date(t.getTime() + 24 * 3600 * 1000);
+    sinceInput.value = toLocalInput(t);
+    untilInput.value = toLocalInput(end);
+    auditReplay();   // drill down：以该分桶为窗口重新回放
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
+function toLocalInput(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+         `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 async function auditReplay() {
   const body = $("#auditBody");
   if (!body) return;
-  if (_replayTimer) { clearInterval(_replayTimer); _replayTimer = null; }
+  auditReplayStop();
+  const wsId = ($("#auditWs") || {}).value || "";
   const since = ($("#auditSince") || {}).value || "";
   const until = ($("#auditUntil") || {}).value || "";
   if (!since && !until) { alert("请先选择「起/止」时间范围再回放"); return; }
-  renderAudit();
-  await new Promise((r) => setTimeout(r, 300));
-  const rows = Array.from(body.querySelectorAll("tr"));
-  if (!rows.length) { alert("该时间范围内没有审计记录"); return; }
-  rows.forEach((tr) => tr.classList.remove("replay-hl"));
-  let i = 0;
-  _replayTimer = setInterval(() => {
-    if (i > 0) rows[i - 1].classList.remove("replay-hl");
-    if (i >= rows.length) { clearInterval(_replayTimer); _replayTimer = null; return; }
-    rows[i].classList.add("replay-hl");
-    rows[i].scrollIntoView({ block: "center", behavior: "smooth" });
-    i++;
-  }, 700);
+  const bucket = chooseBucket(since, until);
+  const tl = $("#auditTimeline");
+  if (tl) tl.dataset.bucket = bucket;
+  let qs = `?limit=2000` +
+    (wsId ? `&workspace_id=${encodeURIComponent(wsId)}` : "") +
+    (since ? `&since=${encodeURIComponent(since.replace("T", " "))}` : "") +
+    (until ? `&until=${encodeURIComponent(until.replace("T", " "))}` : "") +
+    `&bucket=${encodeURIComponent(bucket)}`;
+  try {
+    const r = await apiFetch(`/audit/timeline${qs}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    _replay.items = d.items || [];
+    _replay.idx = 0;
+    renderTimeline(d.buckets || []);
+    body.innerHTML = _replay.items.map(auditRowHtml).join("");
+    const st = $("#auditReplayStat");
+    if (st) st.textContent = `准备回放 ${_replay.items.length} 条`;
+    if (!_replay.items.length) { alert("该时间范围内没有审计记录"); auditReplayStop(); return; }
+    auditReplayResume(true);
+  } catch (e) {
+    if (body) body.innerHTML = "";
+    const st = $("#auditReplayStat");
+    if (st) st.textContent = "回放加载失败：" + e.message;
+  }
 }
 
 // ================= OIDC 单点登录（dev mock / 真实 IdP） =================

@@ -758,3 +758,44 @@ body {
 
 /* 审计回放高亮 */
 .audit-table tbody tr.replay-hl { background: rgba(34,211,238,.18); outline: 1px solid var(--primary-2); }
+
+/* 可回放审计时间线（密度时间轴） */
+.audit-timeline {
+  display: none;                 /* 默认隐藏，回放时由 JS 切到 flex */
+  align-items: flex-end;
+  gap: 2px;
+  height: 84px;
+  padding: 8px 6px 4px;
+  margin: 0 0 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.audit-timeline .tl-bar {
+  flex: 0 0 auto;
+  width: 7px;
+  min-height: 4px;
+  border-radius: 3px 3px 0 0;
+  cursor: pointer;
+  transition: transform .1s ease, filter .1s ease;
+}
+.audit-timeline .tl-bar:hover {
+  transform: scaleY(1.08);
+  filter: brightness(1.25);
+  outline: 1px solid var(--text-dim);
+}
+.audit-timeline .tl-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  align-self: center;
+  margin: auto;
+}
+.audit-replay-stat {
+  align-self: center;
+  font-size: 12px;
+  color: var(--primary-2);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}

@@ -352,8 +352,19 @@
           <label class="audit-field"><span>起</span><input id="auditSince" type="datetime-local" /></label>
           <label class="audit-field"><span>止</span><input id="auditUntil" type="datetime-local" /></label>
           <button class="ghost-btn" id="auditReplay">▶ 回放</button>
+          <label class="audit-field"><span>回放速度</span>
+            <select id="auditSpeed">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+          </label>
+          <button class="ghost-btn" id="auditPlay" disabled>⏸ 暂停</button>
+          <span class="audit-replay-stat" id="auditReplayStat"></span>
           <span class="audit-scope" id="auditScope"></span>
         </div>
+        <div class="audit-timeline" id="auditTimeline" title="审计密度时间轴：柱越高=该时段操作越密集；点击柱可缩放该时段"></div>
         <div class="audit-wrap">
           <table class="audit-table">
             <thead>
@@ -579,6 +590,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.44"></script>
+  <script src="app.js?v=0.8.45"></script>
 </body>
 </html>
