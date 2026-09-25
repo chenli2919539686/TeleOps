@@ -13,5 +13,13 @@
     "user": "",
     "password": "",
     "verify_ssl": false
+  },
+  "alert-5g": {
+    "dataset_path": "data/5g_dataset",
+    "min_severity": "major",
+    "thresholds": {
+      "rsrp_dbm": { "warn": -110.0, "major": -115.0, "critical": -120.0 },
+      "sinr_db":  { "warn": 0.0, "major": -3.0, "critical": -6.0 }
+    }
   }
 }

@@ -18,6 +18,8 @@ data/llm_config.json
 data/llm_usage.json
 # 适配器真实连接配置（外部系统地址/凭据，非源码；示例见 data/adapters.example.json）
 data/adapters.json
+# 公开 5G 数据集（scripts/fetch_5g_dataset.py 下载，原始大文件不入库）
+data/5g_dataset/
 logs/
 # 构建快照（scripts/build_hf_space.py 生成，非源码）
 hf_space_build/

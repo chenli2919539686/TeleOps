@@ -1,18 +1,20 @@
-"""集成适配器真实落地的单元测试（Zabbix 告警 / ELK 日志）。
+"""集成适配器真实落地的单元测试（Zabbix 告警 / ELK 日志 / 5G 数据集）。
 
 覆盖两条路径：
   - demo 模式（未配置 base_url/凭据）：parse/fetch 返回结构正确的样例数据
   - 真实连接映射（monkeypatch 网络调用）：外部 API 响应 -> 统一 Schema 的转换
 """
+import csv
 import sys
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.adapters.real_adapters import (
-    ZabbixAlertAdapter, ELKLogAdapter, _norm_severity,
+    ZabbixAlertAdapter, ELKLogAdapter, FiveGKpiAdapter, _norm_severity,
 )
 from src.adapters import real_adapters
+from src.adapters import fiveg_dataset as _ds
 
 
 # ---------------- Zabbix：severity 归一化 ----------------
@@ -150,3 +152,97 @@ def test_registry_marks_real_adapters_as_sample():
     # 旧的本地/预留适配器不受影响
     assert r.get("alert-prometheus").status == "sample"
     assert r.get("alert-imaster").status == "reserved"
+
+
+# ===========================================================================
+# 5G 公开数据集接入（P0① 真实电信数据接入）
+# ===========================================================================
+def _write_dataset(path, rows):
+    cols = ["Timestamp", "CellID", "NetworkMode", "RSRP", "RSRQ", "SNR", "CQI",
+            "RSSI", "DL_bitrate", "UL_bitrate", "PINGLOSS"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+# 一行严重劣化（多指标 critical），一行健康（不进告警流）
+_DEGRADED = {"Timestamp": "2019.12.16_13.40.04", "CellID": "11", "NetworkMode": "5G",
+             "RSRP": "-125", "RSRQ": "-20", "SNR": "-7", "CQI": "2", "RSSI": "-105",
+             "DL_bitrate": "2", "UL_bitrate": "0", "PINGLOSS": "8"}
+_HEALTHY = {"Timestamp": "2019.12.16_13.41.04", "CellID": "11", "NetworkMode": "5G",
+            "RSRP": "-95", "RSRQ": "-10", "SNR": "20", "CQI": "14", "RSSI": "-80",
+            "DL_bitrate": "120", "UL_bitrate": "30", "PINGLOSS": "0"}
+
+
+def test_fiveg_row_to_payloads_direction_aware():
+    """RSRP/RSRQ/SNR 等「越低越差」指标必须按方向判级，不能反比。"""
+    payloads = _ds.row_to_payloads(_DEGRADED)
+    by_metric = {p["metric"]: p for p in payloads}
+    assert by_metric["rsrp_dbm"]["severity"] == "critical"   # -125 <= -120
+    assert by_metric["rsrq_db"]["severity"] == "major"       # -20 <= -18 (>-21)
+    assert by_metric["sinr_db"]["severity"] == "critical"    # -7 <= -6
+    assert by_metric["dl_throughput_mbps"]["severity"] == "critical"
+    assert by_metric["ping_loss_pct"]["severity"] == "critical"  # higher_worse 8>=5
+    # 健康行不应产生任何告警
+    assert _ds.row_to_payloads(_HEALTHY) == []
+
+
+def test_fiveg_parse_webhook_honors_explicit_severity():
+    """payload 自带 severity 时必须原样采用，不被比值逻辑覆盖（越低越差不被反算）。"""
+    a = FiveGKpiAdapter().parse_webhook(
+        {"cell": "C1", "metric": "rsrp_dbm", "value": -95, "threshold": -110,
+         "severity": "major"})[0]
+    assert a["severity"] == "major"
+    # 无显式 severity 时，value=-95 高于阈值 -> 默认 info（不告警方向）
+    a2 = FiveGKpiAdapter().parse_webhook(
+        {"cell": "C1", "metric": "rsrp_dbm", "value": -95, "threshold": -110})[0]
+    assert a2["severity"] == "info"
+
+
+def test_fiveg_adapter_load_dataset_alerts(tmp_path):
+    """端到端：数据集目录 -> 统一 Alert（host=小区、severity 正确、健康行被跳过）。"""
+    d = tmp_path / "ds"
+    d.mkdir()
+    _write_dataset(d / "trace.csv", [_DEGRADED, _HEALTHY])
+    adp = FiveGKpiAdapter({"dataset_path": str(d)})
+    alerts = adp.load_dataset_alerts()
+    # 仅 _DEGRADED 这一行产生告警（8 个超阈指标）
+    assert len(alerts) == 8
+    assert all(a["host"] == "11" for a in alerts)
+    # 方向感知判级：RSRP/SINR/CQI/RSSI/吞吐/丢包=critical，RSRQ=-20 落 major 档
+    by_metric = {a["metric"]: a["severity"] for a in alerts}
+    assert by_metric["rsrp_dbm"] == "critical"
+    assert by_metric["sinr_db"] == "critical"
+    assert by_metric["ping_loss_pct"] == "critical"
+    assert by_metric["rsrq_db"] == "major"  # -20 ∈ (major=-18, critical=-21]
+    assert all(a["source"] == "5g-kpi" for a in alerts)
+    # 配置缺失时回退空列表
+    assert FiveGKpiAdapter().load_dataset_alerts() == []
+
+
+def test_fiveg_adapter_healthcheck_dataset_mode(tmp_path):
+    d = tmp_path / "ds"
+    d.mkdir()
+    _write_dataset(d / "t.csv", [_DEGRADED])
+    h = FiveGKpiAdapter({"dataset_path": str(d)}).healthcheck()
+    assert h["mode"] == "dataset"
+    assert h["dataset_path"] == str(d)
+    # 未配置 -> demo
+    assert FiveGKpiAdapter().healthcheck()["mode"] == "demo"
+
+
+def test_fiveg_ts_normalization():
+    assert _ds._parse_ts("2019.12.16_13.40.04") == "2019-12-16T13:40:04Z"
+    assert _ds._parse_ts("-") == ""
+    assert _ds._parse_ts("") == ""
+
+
+def test_fiveg_min_severity_floor():
+    """min_severity 过滤掉低严重度告警（真实数据噪声抑制）。"""
+    all_p = _ds.row_to_payloads(_DEGRADED)            # 7 critical + 1 major
+    crit_only = _ds.row_to_payloads(_DEGRADED, min_severity="critical")
+    assert len(all_p) == 8
+    assert len(crit_only) == 7                        # 去掉 major 的 RSRQ
+    assert all(p["severity"] == "critical" for p in crit_only)

@@ -23,6 +23,7 @@ except Exception:  # noqa: BLE001
     requests = None
 
 from src.adapters.base import AlertAdapter, LogAdapter, NORTH, SOUTH
+from src.adapters import fiveg_dataset as _ds  # 5G 公开数据集加载器（P0① 真实电信数据接入）
 
 # Zabbix severity 数值 -> 内核统一标签
 ZABBIX_SEVERITY = {
@@ -353,8 +354,17 @@ class FiveGKpiAdapter(AlertAdapter):
     description = "把 5G 小区 KPI（RRC 建立成功率/PRB 利用率/丢包率等）超阈转成内核统一 Alert；配置 alert-5g 后接真实数据集。"
 
     def __init__(self, config: Optional[dict] = None):
-        # 当前 demo 兜底即可；真实数据集路径/凭据放这里（data/adapters.json[alert-5g]）
-        self._config = config or {}
+        # 真实数据源配置（data/adapters.json[alert-5g]）：
+        #   dataset_path : 数据集文件/目录/glob（如 data/5g_dataset）
+        #   thresholds   : 可选，按指标覆盖 METRIC_SPECS 的边界（good/warn/major/critical）
+        cfg = config or {}
+        self._config = cfg
+        self.dataset_path: str = (cfg.get("dataset_path") or "").strip()
+        self._specs = dict(_ds.METRIC_SPECS)
+        for metric, bounds in (cfg.get("thresholds") or {}).items():
+            if metric in self._specs and isinstance(bounds, dict):
+                self._specs[metric].update({k: float(v) for k, v in bounds.items()
+                                            if k in ("good", "warn", "major", "critical")})
 
     # 指标 -> 严重度映射（越界幅度）
     _SEV_BY_RATIO = [
@@ -378,13 +388,19 @@ class FiveGKpiAdapter(AlertAdapter):
             except (TypeError, ValueError):
                 threshold = 0.0
             ts = it.get("ts") or it.get("Timestamp") or ""
-            # 越界幅度 -> severity
-            ratio = (value - threshold) / threshold if threshold else 0.0
-            severity = "info"
-            for r, sev in self._SEV_BY_RATIO:
-                if ratio >= r:
-                    severity = sev
-                    break
+            # 越界幅度 -> severity（仅当 payload 未自带显式 severity 时计算）
+            # 注意：5G 数据集 loader 已按指标方向算好 severity 并随 payload 传入，
+            # 这里必须优先采用，否则 RSRP/RSRQ/SNR 等「越低越差」指标会被反比。
+            explicit = it.get("severity")
+            if explicit:
+                severity = str(explicit).lower()
+            else:
+                ratio = (value - threshold) / threshold if threshold else 0.0
+                severity = "info"
+                for r, sev in self._SEV_BY_RATIO:
+                    if ratio >= r:
+                        severity = sev
+                        break
             out.append(self.to_unified({
                 "alert_id": f"5g-{cell}-{metric}".replace(" ", "_"),
                 "ts": ts,
@@ -416,10 +432,39 @@ class FiveGKpiAdapter(AlertAdapter):
         """返回一组 demo 5G 告警（供前端一键试推）。"""
         return self.parse_webhook(self._demo_kpis())
 
+    def load_dataset_alerts(self, path: Optional[str] = None, limit: Optional[int] = None,
+                            min_severity: Optional[str] = None) -> List[Dict[str, Any]]:
+        """读真实 5G 数据集（uccmisl/5Gdataset）→ 统一 Alert 列表。
+
+        这是「真实电信数据接入」的主入口：数据集行经 fiveg_dataset.row_to_payloads
+        算出按指标方向的 severity，再统一封装成内核 Alert，可直接喂进 alert_stream
+        让运维 Agent 做根因分析。未配置 dataset_path 时返回空列表（由调用方回退 demo）。
+
+        min_severity：严重度下限（默认取自配置 min_severity，否则 info=全部）。
+        真实数据集噪声大，建议用 "major" 过滤掉 warning，避免健康波动刷屏。
+        """
+        ds = (path or self.dataset_path or "").strip()
+        if not ds:
+            return []
+        floor = min_severity or self._config.get("min_severity") or "info"
+        payloads = _ds.load_payloads(ds, limit=limit, specs=self._specs, min_severity=floor)
+        return [self.to_unified(p) for p in payloads]
+
     def healthcheck(self) -> Dict[str, Any]:
+        import os
+        if self.dataset_path and os.path.isfile(self.dataset_path) or \
+           (self.dataset_path and os.path.isdir(self.dataset_path)):
+            n = 0
+            try:
+                n = len(_ds.load_payloads(self.dataset_path, limit=2000, specs=self._specs))
+            except Exception:  # noqa: BLE001
+                n = 0
+            return {"reachable": True, "mode": "dataset", "dataset_path": self.dataset_path,
+                    "sampled_alerts": n,
+                    "note": "已接入真实 5G 数据集，loader 把小区 KPI 超阈转成统一 Alert 并喂入告警流"}
         return {"reachable": True, "mode": "demo",
                 "endpoint": "data/adapters.json[alert-5g]",
-                "note": "未配置真实数据集，demo 小区 KPI 可真实解析并喂入告警流；配置 alert-5g 后接真实 5G/OSS 数据"}
+                "note": "未配置 dataset_path，demo 小区 KPI 可真实解析并喂入告警流；配置 alert-5g.dataset_path 后接真实 5G/OSS 数据"}
 
 
 # ---------------------------------------------------------------------------

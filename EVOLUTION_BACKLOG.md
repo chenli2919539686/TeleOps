@@ -11,13 +11,21 @@
   零阻塞，后台线程串行消费 `db.audit`（存储语义不变）。测试 `tests/test_audit_queue.py` 4/4。
 - **人工审批 HITL 闭环（v0.8.35）**：两层闸 + admin 运行时开关；详见 `docs/07`。
 - **多副本实战验证 + D3 状态共享（v0.8.34）**：真实 Redis + 双副本 7/7 通过；`docs/06`。
+- **真实电信数据接入（v0.8.37，首切·管线打通）**：数据源定 `uccmisl/5Gdataset`（公开 5G KPI）。
+  `src/adapters/fiveg_dataset.py` 加载器（列名容错 + 按指标方向阈值，解决 RSRP/RSRQ/SNR「越低越差」反算）
+  + `FiveGKpiAdapter.load_dataset_alerts`；`scripts/fetch_5g_dataset.py` 取数、`scripts/replay_5g_dataset.py`
+  回放到 `/adapters/alert/ingest` → 运维 Agent 根因。测试 `tests/test_adapters_real.py`（含 5G 共 19 例）。
+  剩余：① 量化评估基准（注入故障算 Top-1/噪声抑制，联动下项）；② OSS 导出高保真源（用户给文件后改 adapter 配置即切）。
 
 ## ❌ 待完善（建议推进序）
-1. **真实电信数据接入**（最大价值跳：作品 → 行业方案）
-   - 数据源需用户定（公开数据集 `uccmisl/5Gdataset` / OSS 导出 / 某现网导出）
-   - 实现 `5G_kpi_adapter.parse_webhook` 把真实 5G KPI/告警喂进 `alert_stream`
+1. **真实电信数据接入（首切已落地，剩两项收尾）**
+   - ✅ 数据源已定 `uccmisl/5Gdataset` 并打通「真实 KPI → 根因」管线（v0.8.37）。
+   - ① **量化评估基准**：用 ns-3 或合成注入故障造带根因标签的小样本，跑 Agent 算 Top-1 准确率 +
+     噪声抑制率（即下一项 P0-2，二者绑定）。
+   - ② **OSS 导出高保真源**：等用户给一份真实 OSS/网管导出（小区级 KPI+告警+拓扑），
+     只需在 `data/adapters.json[alert-5g]` 补列映射 + 改 `dataset_path`，loader 复用、零返工。
 2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）
-   - 依赖真实数据先有；前端大屏加统计卡片（对齐 TelcoNet 的可量化说服力）
+   - 依赖真实数据先有；前端大屏加统计卡片（对齐 TelcoNet 的可量化说服力）。
 3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki）
    - 架构已预留 `real_adapters.py`，落地较快；让 Agent 拉真实指标做诊断
 4. **SQLite → Postgres**（连接串切换 + 迁移脚本）
