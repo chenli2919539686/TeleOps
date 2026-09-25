@@ -75,7 +75,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.35"
+VERSION = "0.8.36"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -251,10 +251,17 @@ def _actor_of(request: Request, fallback_username: str = None):
 
 
 def _audit_write(request: Request, action: str, ws_id, detail, result="ok"):
-    """写类操作的审计便捷封装：从 request 取操作人、IP，落到 audit_log。"""
+    """写类操作的审计便捷封装：从 request 取操作人、IP，异步落到 audit_log。
+
+    入队 O(1) 立即返回，db.audit 由后台线程消费，请求路径零阻塞。
+    """
     actor, actor_id = _actor_of(request)
-    db.audit(actor, action, workspace_id=ws_id, detail=detail, result=result,
-             actor_id=actor_id, ip=_client_ip(request))
+    ip = _client_ip(request)  # 请求线程取 IP，避免后台线程访问已回收的 request
+    from src.core.audit_queue import get_writer
+    get_writer().enqueue(
+        lambda: db.audit(actor, action, workspace_id=ws_id, detail=detail,
+                         result=result, actor_id=actor_id, ip=ip)
+    )
 
 
 # ---------------- LLM 运行时配置（前端设置面板可热更新） ----------------
@@ -945,9 +952,12 @@ def _run_stream_start(p: Dict[str, Any]) -> bool:
 
 
 def _audit_write_dummy(action, ws_id, detail):
-    """无 request 上下文时写审计（审批异步执行用）。"""
-    db.audit("system(hitl)", action, workspace_id=ws_id, detail=detail, result="ok",
-             actor_id=None, ip="internal")
+    """无 request 上下文时写审计（审批异步执行用），异步化。"""
+    from src.core.audit_queue import get_writer
+    get_writer().enqueue(
+        lambda: db.audit("system(hitl)", action, workspace_id=ws_id, detail=detail,
+                         result="ok", actor_id=None, ip="internal")
+    )
 
 
 
