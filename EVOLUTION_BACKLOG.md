@@ -86,6 +86,11 @@
   新增 `GET/POST /admin/roles`（org.manage 闸，可运营分配/回收角色，含两道锁死闸）。不放松既有 admin-only 闸。
   测试 `tests/test_rbac.py` 9/9。详见 `docs/04` 第 10 条。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
+- **生产部署清单（百人规模）已出（v0.8.49）**：`docs/10-生产部署清单（百人规模）.md`——基于现有
+  `deploy/docker-compose.yml` 串联出形态 A（单机容器化+Postgres+多 worker）与形态 B（多副本+Redis 状态外置），
+  含容量评估、一键命令、头号坑（限流 XFF 反代）、备份回滚、上线检查清单。补 `deploy/README.md` Phase 0 的百人缺口。
+- **合规与数据主权方案已出（v0.8.49）**：`docs/11-合规与数据主权方案.md`——等保级别判断框架、数据出域风险、
+  模型私有化（改 `TELEOPS_LLM_BASE_URL` 零代码）、等保 2.0 要求映射、信创适配、分阶段路线图。纯方案层，不强制改代码。
 
 ## 下一步候选（等用户拍板）
 - 剩余非阻塞增强（均已无代码阻塞，纯等时机）：
