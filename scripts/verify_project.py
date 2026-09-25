@@ -135,7 +135,12 @@ except Exception as e:
     log("T1b topology", False, str(e))
 
 try:
-    st, d = get("/tools"); log("T1c tools", st == 200 and len(d.get("tools", [])) == 2, f"tools={[t['name'] for t in d.get('tools', [])]}")
+    st, d = get("/tools")
+    tools = [t["name"] for t in d.get("tools", [])]
+    # 早期基线 2 个工具（optical_power_probe / ping_host）必须存在；后续演进新增的
+    # pull_logs / pull_metrics / restart_service 等不计入「恰好 2 个」，故用 >=2 + 关键工具存在判定。
+    ok = st == 200 and len(tools) >= 2 and "optical_power_probe" in tools and "ping_host" in tools
+    log("T1c tools", ok, f"tools={tools}")
 except Exception as e:
     log("T1c tools", False, str(e))
 
