@@ -20,6 +20,31 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
 
+    # 让「真实 Redis / 真实 Postgres」集成测试在 CI 真跑（本机无二进制时自动 skip）。
+    # 这把 D3 多副本状态共享、审批外部化、Postgres DAL 方言三套回归守卫从「skip」升级为「真执行」。
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -69,9 +94,11 @@ jobs:
       # ---- 守卫 5：全量测试门（核心）----
       # 失败时把 FAILED/ERROR 行以 ::error:: 抛出 → 变成 GitHub 注解，
       # 无需下载日志也能在 PR 页面直接看到失败用例名（排障友好）。
-      # 说明：依赖真实 Redis 二进制 / Postgres DSN 的少数集成用例在无对应环境时
-      # 会自动 skip（见 docs/13 §6.1），不阻断门禁。
+      # 注入外部 Redis / Postgres，让集成测试在 CI 真跑（无对应 service 时自动 skip）。
       - name: 测试门（全量 pytest）
+        env:
+          TELEOPS_TEST_REDIS_URL: redis://localhost:6379
+          TELEOPS_TEST_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
         run: |
           # 注意：GitHub 的 run 默认走 `bash -e`，若用 pipefail 会在失败管道处直接退出、
           # 后面的注解代码根本不执行。这里用 `|| true` 兜住 -e，再用 PIPESTATUS[0]

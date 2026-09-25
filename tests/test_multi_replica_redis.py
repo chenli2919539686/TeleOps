@@ -44,10 +44,32 @@ def _free_port():
         s.close()
 
 
+def _wait_ready(client, deadline):
+    while time.time() < deadline:
+        try:
+            if client.ping():
+                return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
 @pytest.fixture(scope="module")
 def redis_url():
+    # 优先使用外部已运行的 Redis（CI service container / 本机 docker），
+    # 通过 TELEOPS_TEST_REDIS_URL 注入；缺失再回退到本地 Windows 二进制。
+    env_url = os.environ.get("TELEOPS_TEST_REDIS_URL")
+    if env_url:
+        os.environ.setdefault("TELEOPS_REDIS_PROTOCOL", "2")
+        client = redis.Redis.from_url(env_url, protocol=2)
+        if not _wait_ready(client, time.time() + 15):
+            pytest.skip("TELEOPS_TEST_REDIS_URL 指向的 Redis 未在 15s 内就绪")
+        yield env_url
+        return
+    # 回退：本地 Windows 二进制（tools/redis/redis-server.exe）
     if not os.path.exists(REDIS_EXE):
-        pytest.skip("tools/redis/redis-server.exe 不存在：从 nuget redis-64 解压后可跑真实 Redis 集成测试")
+        pytest.skip("无 TELEOPS_TEST_REDIS_URL 且 tools/redis/redis-server.exe 不存在：跳过真实 Redis 集成测试")
+    os.environ.setdefault("TELEOPS_REDIS_PROTOCOL", "2")
     port = _free_port()
     proc = subprocess.Popen(
         [REDIS_EXE, "--port", str(port), "--save", "", "--appendonly", "no",
@@ -55,16 +77,7 @@ def redis_url():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     url = f"redis://127.0.0.1:{port}/0"
     client = redis.Redis.from_url(url, protocol=2)
-    ok = False
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        try:
-            if client.ping():
-                ok = True
-                break
-        except Exception:
-            time.sleep(0.3)
-    if not ok:
+    if not _wait_ready(client, time.time() + 15):
         proc.terminate()
         pytest.skip("Redis 未在 15s 内就绪（可能被沙箱拦截）")
     yield url
