@@ -9,7 +9,15 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from src.core.audit_queue import AuditWriter
+
+
+@pytest.fixture(autouse=True)
+def _force_async(monkeypatch):
+    """本文件测的就是「异步队列」本身，必须豁免 conftest 的全局同步开关。"""
+    monkeypatch.setenv("TELEOPS_AUDIT_SYNC", "0")
 
 
 def test_enqueue_nonblocking_and_async():

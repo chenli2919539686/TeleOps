@@ -10,11 +10,18 @@
 from __future__ import annotations
 
 import atexit
+import os
 import threading
 from queue import Empty, Queue
 from typing import Callable, Optional
 
 _MAX_QUEUE = 20000
+
+
+def _sync_enabled() -> bool:
+    """是否同步执行审计（测试用开关），每次调用时读 env，便于运行期切换。"""
+    return os.environ.get("TELEOPS_AUDIT_SYNC", "0").strip().lower() in (
+        "1", "on", "true", "yes")
 
 
 class AuditWriter:
@@ -27,7 +34,19 @@ class AuditWriter:
         atexit.register(self.flush)
 
     def enqueue(self, fn: Callable[[], None]) -> None:
-        """提交一个审计调用（无参 callable），立即返回，不阻塞调用方。"""
+        """提交一个审计调用（无参 callable），立即返回，不阻塞调用方。
+
+        ``TELEOPS_AUDIT_SYNC=1`` 时**同步执行**（测试用）：审计断言类用例会在动作
+        之后立刻查 /audit，若仍走后台线程就会撞上"还没落库"的竞态，表现为
+        CI 上不同用例轮流红（每次换一个）。测试环境因此默认同步；生产保持异步。
+        env 在**调用时**读取，便于单测在运行期切换（见 tests/test_audit_queue.py）。
+        """
+        if _sync_enabled():
+            try:
+                fn()
+            except Exception:
+                pass  # 与后台线程一致：审计失败不影响主流程
+            return
         try:
             self._queue.put_nowait(fn)
         except Exception:

@@ -25,6 +25,10 @@ os.environ["TELEOPS_JWT_SECRET"] = "pytest-secret-do-not-use-in-prod"
 os.environ["TELEOPS_API_TOKEN"] = ""      # 不启用共享 Token，只走 JWT
 os.environ["DEEPSEEK_API_KEY"] = ""       # 强制离线 Mock 推理
 os.environ["TELEOPS_RATE_LIMIT"] = "off"  # 全局关限流：既有用例不受窗口干扰；test_ratelimit 单独运行时打开
+# 审计默认改**同步写**：审计断言类用例（如"越权应留痕"）在动作后立刻查 /audit，
+# 走后台线程会撞"还没落库"的竞态 → CI 上不同用例轮流红。生产仍异步（env 不设即异步）；
+# tests/test_audit_queue.py 会对自己豁免以保留异步语义测试。
+os.environ["TELEOPS_AUDIT_SYNC"] = "1"
 
 # LLM 配置与用量统计同样必须隔离：DATA_DIR 不能被整体重定向（拓扑/告警种子
 # 数据仍来自真实 data/），但 data/llm_config.json 里存着开发者本机的真实 Key。
