@@ -49,10 +49,17 @@ def get_lan_ip() -> str:
 
 
 def _render_caddyfile() -> Path:
-    """将模板 Caddyfile 中的 {lan_ip} 替换为当前局域网 IP，写入运行时配置。"""
+    """将模板 Caddyfile 中的 {lan_ip} / {upstreams} 替换为实际值，写入运行时配置。
+
+    - {lan_ip}: 当前局域网 IP（用于 internal 证书 SAN）
+    - {upstreams}: 反代后端列表，空格分隔；默认 127.0.0.1:8000（单节点）；
+      多副本部署用环境变量 TELEOPS_BACKENDS 指定（如 "127.0.0.1:8000 127.0.0.1:8001"）
+    """
     template = CADDYFILE.read_text(encoding="utf-8")
     lan_ip = get_lan_ip()
     rendered = template.replace("{lan_ip}", lan_ip)
+    backends = os.environ.get("TELEOPS_BACKENDS", "127.0.0.1:8000").strip() or "127.0.0.1:8000"
+    rendered = rendered.replace("{upstreams}", backends)
     RUNTIME_CADDYFILE.parent.mkdir(parents=True, exist_ok=True)
     RUNTIME_CADDYFILE.write_text(rendered, encoding="utf-8")
     return RUNTIME_CADDYFILE
@@ -215,7 +222,7 @@ def caddy_status():
         "pid_file_stale": bool(port_up and not healed and not alive),
         "pid_file_healed": healed,
         "exe": str(_resolve_caddy_exe() or CADDY_EXE),
-        "http": BACKEND_HTTP,
+        "http": os.environ.get("TELEOPS_BACKENDS", BACKEND_HTTP),
     }
     return running, info
 

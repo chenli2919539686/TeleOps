@@ -57,9 +57,14 @@
      executescript 拆句按方言执行；`TELEOPS_DB_DSN=postgresql://...` 即切，默认仍 SQLite 零依赖。
    - 测试：`tests/test_db_postgres.py`（纯翻译单测常跑 + 真连集成测试按 `TELEOPS_TEST_PG_DSN` 启停）。
    - 部署：`deploy/docker-compose.yml` 加 `postgres` 服务（`--profile pg` 启用）。
-5. **多 worker**（uvicorn `--workers` + Caddy upstream 多目标）
-   - **必须先切 Postgres**（SQLite 多进程写有坑，Windows spawn 也坑）；D3 Redis 已打底
-6. **Caddy 多后端**（upstreams 指多副本 + `/health` 探活看 `replica_id`）
+5. **多 worker + Caddy 多后端** ✅ **已落地（v0.8.42）**
+   - `scripts/teleops_ctl.py` `start` 加 `--workers N`（uvicorn 多进程；>1 自动告警需 Postgres）
+     + `--port P`（多副本各自独立 PID/日志文件，互不覆盖），`stop/restart/status` 同步支持 `--port`。
+   - `scripts/Caddyfile` 反代 `{upstreams}` 占位符（默认 `127.0.0.1:8000`；`TELEOPS_BACKENDS`
+     指定多副本 upstream）+ `health_uri /health` 主动探活；`caddy_runner._render_caddyfile` 注入。
+   - 测试：`tests/test_caddy_runner.py` 骨架 + 渲染（含 `TELEOPS_BACKENDS` 多副本渲染断言）。
+   - 部署：先 `TELEOPS_DB_DSN=postgresql://...` 切 Postgres，再 `start --workers N`；多机多副本用
+     `TELEOPS_BACKENDS` 指各副本，Caddy 自动负载均衡 + 剔除不健康节点。详见 `docs/06` §8。
 
 ## 联动提醒
 - 真·多副本投产时，HITL 审批单 / `data/settings.json` 是**本地 JSON 不跨副本**，

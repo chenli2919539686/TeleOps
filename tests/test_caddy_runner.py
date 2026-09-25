@@ -28,20 +28,37 @@ def test_caddyfile_template_exists_and_skeleton_valid():
     assert "127.0.0.1, localhost, {lan_ip}" in text, "Caddyfile 应覆盖 127.0.0.1 / localhost / {lan_ip}"
     # 自签证书
     assert "tls internal" in text, "应使用 tls internal 自签证书"
-    # 反代到后端
-    assert "127.0.0.1:8000" in text, "应反代到 127.0.0.1:8000"
+    # 反代到后端（多副本占位符 {upstreams}，运行时由 TELEOPS_BACKENDS 替换，默认 127.0.0.1:8000）
+    assert "{upstreams}" in text, "应使用 {upstreams} 占位符以支持多副本后端"
     assert "reverse_proxy" in text, "应使用 reverse_proxy 指令"
+    # 多副本主动健康探活
+    assert "health_uri" in text, "reverse_proxy 应配置 health_uri 主动探活"
 
 
 def test_render_caddyfile_replaces_lan_ip():
-    """_render_caddyfile 把 {lan_ip} 替换为真实局域网 IP。"""
+    """_render_caddyfile 把 {lan_ip} / {upstreams} 替换为实际值。"""
     from scripts import caddy_runner
     runtime = caddy_runner._render_caddyfile()
     text = runtime.read_text(encoding="utf-8")
-    assert "{lan_ip}" not in text, "运行时 Caddyfile 不应残留占位符"
+    assert "{lan_ip}" not in text, "运行时 Caddyfile 不应残留 {lan_ip} 占位符"
     assert caddy_runner.get_lan_ip() in text, "运行时 Caddyfile 应包含当前局域网 IP"
     # 监听 443（站点块内会隐式监听默认 HTTPS 端口）
     assert "127.0.0.1, localhost," in text, "站点地址应保持三元素格式"
+    # 默认单节点上游 127.0.0.1:8000 应被渲染出来
+    assert "{upstreams}" not in text, "运行时 Caddyfile 不应残留 {upstreams} 占位符"
+    assert "127.0.0.1:8000" in text, "默认上游 127.0.0.1:8000 应被渲染"
+
+
+def test_render_caddyfile_uses_teops_backends(monkeypatch, tmp_path):
+    """TELEOPS_BACKENDS 多副本时，{upstreams} 被替换成空格分隔的多 upstream。"""
+    from scripts import caddy_runner
+    monkeypatch.setenv("TELEOPS_BACKENDS", "127.0.0.1:8000 127.0.0.1:8001 127.0.0.1:8002")
+    # 隔离运行时文件，避免污染 data/.caddy.Caddyfile
+    monkeypatch.setattr(caddy_runner, "RUNTIME_CADDYFILE", tmp_path / ".caddy.Caddyfile")
+    runtime = caddy_runner._render_caddyfile()
+    text = runtime.read_text(encoding="utf-8")
+    assert "127.0.0.1:8000 127.0.0.1:8001 127.0.0.1:8002" in text, "多副本 upstream 应被渲染"
+    assert "{upstreams}" not in text
 
 
 def test_caddy_runner_resolves_path():

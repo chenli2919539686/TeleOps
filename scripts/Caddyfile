@@ -6,16 +6,23 @@
 #   caddy stop --config Caddyfile
 #
 # 监听：443（HTTPS）/ 80（自动跳 HTTPS，可选）
-# 反代：本地 127.0.0.1:8000（TeleOps 后端 uvicorn）
+# 反代：本地后端（默认 127.0.0.1:8000，单节点；多副本用 TELEOPS_BACKENDS 指定多个 upstream）
 # 证书：Caddy internal 自签证书（首次访问浏览器提示「不安全」，点高级→继续即可）
+# 健康探活：reverse_proxy 内置 active health check，打后端 /health，自动剔除/加回异常节点
 
 # LAN HTTPS 入口：明确列出 IP/主机名，让 Caddy internal 证书覆盖这些 SAN
 # {lan_ip} 由 caddy_runner.py 在启动时替换为当前局域网 IP
 127.0.0.1, localhost, {lan_ip} {
     tls internal
 
-    # 反代到本地后端
-    reverse_proxy 127.0.0.1:8000 {
+    # 反代到后端（支持多副本负载均衡）：
+    # {upstreams} 由 caddy_runner._render_caddyfile 替换，默认单节点 127.0.0.1:8000；
+    # 多副本用环境变量 TELEOPS_BACKENDS 指定（空格分隔，如 "127.0.0.1:8000 127.0.0.1:8001"）
+    reverse_proxy {upstreams} {
+        # 主动健康探活：后端 /health 不通则自动剔除，恢复后自动加回（多副本必备）
+        health_uri /health
+        health_interval 10s
+        health_timeout 5s
         # 保留 Host，便于后端按 Host 区分本地/局域网访问
         header_up Host {host}
         # 透传客户端真实 IP（Caddy 默认会带 X-Forwarded-For）
