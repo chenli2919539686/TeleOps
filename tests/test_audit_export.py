@@ -5,6 +5,7 @@
 （_base_where + _apply_filters），绝不越权泄露他人业务域记录。
 审计行用直接 SQL 插入保证确定性（绕过异步审计队列）。
 """
+import csv
 import uuid
 
 from src.core import db, auth
@@ -78,10 +79,13 @@ def test_export_admin_sees_all_but_user_isolated(client, admin_headers):
     assert wsA in body and wsB in body
 
     # 普通用户 A 只看自己可见域，不含他人业务域 wsB
+    # 注意：必须按列精确比对，不能用 `wsB not in bodyA` 这类子串判断——
+    # 业务域 id 形如 ws-2 / ws-20，子串会把 ws-20 误判成 ws-2（CI 上偶发红即此因）。
     rA = client.get("/audit/export?format=csv", headers=hA)
-    bodyA = rA.content.decode("utf-8-sig")
-    assert wsA in bodyA
-    assert wsB not in bodyA
+    rowsA = list(csv.DictReader(rA.content.decode("utf-8-sig").splitlines()))
+    ws_ids_A = {row["workspace_id"] for row in rowsA}
+    assert wsA in ws_ids_A
+    assert wsB not in ws_ids_A
 
     client.delete(f"/workspaces/{wsA}", headers=hA)
     client.delete(f"/workspaces/{wsB}", headers=hB)
