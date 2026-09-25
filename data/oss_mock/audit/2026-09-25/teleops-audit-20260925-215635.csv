@@ -1,4 +1,0 @@
-﻿﻿id,ts,actor,actor_id,action,workspace_id,detail,result,ip
-6,2026-09-25T21:56:35,ossA_42556ac5,2,auth.login,,,ok,testclient
-7,2026-09-25T21:56:35,ossA_42556ac5,2,workspace.create,ws-3,"{""name"": ""ws-4217a7"", ""mode"": ""auto"", ""owner_id"": 2}",ok,testclient
-10,2026-05-03T00:00:00,A,,workspace.create,ws-3,{},ok,1.2.3.4
