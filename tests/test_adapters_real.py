@@ -246,3 +246,49 @@ def test_fiveg_min_severity_floor():
     assert len(all_p) == 8
     assert len(crit_only) == 7                        # 去掉 major 的 RSRQ
     assert all(p["severity"] == "critical" for p in crit_only)
+
+
+def test_fiveg_oss_column_aliases_override(tmp_path):
+    """OSS 导出（华为/中兴/爱立信列名差异）经 column_aliases 覆盖，纯配置切源、零代码改动。
+
+    验证核心：小区标识列(eNodeB ID)与时间列(Time)不经别名无法映射 → host=unknown-cell、
+    ts 为空；配置别名后正确映射为 host=BTS-07 且 ts 规整。
+    """
+    oss_cols = ["Time", "eNodeB ID", "LTE_RSRP", "LTE_RSRQ", "SINR", "CQI", "RSSI",
+                "DL_Throughput", "UL_Throughput", "Packet_Loss"]
+    oss_row = {"Time": "2026-09-25 13:40:00", "eNodeB ID": "BTS-07", "LTE_RSRP": "-125",
+               "LTE_RSRQ": "-20", "SINR": "-7", "CQI": "2", "RSSI": "-105",
+               "DL_Throughput": "2", "UL_Throughput": "0", "Packet_Loss": "8"}
+    d = tmp_path / "oss"
+    d.mkdir()
+    with open(d / "oss_export.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=oss_cols)
+        w.writeheader()
+        w.writerow(oss_row)
+
+    # ① 无别名：小区标识/时间列匹配不上 → host 全是 unknown-cell、ts 为空
+    no_alias = FiveGKpiAdapter({"dataset_path": str(d)}).load_dataset_alerts()
+    assert no_alias, "应至少产出部分告警"
+    assert all(a["host"] == "unknown-cell" for a in no_alias)
+    assert all(a["ts"] == "" for a in no_alias)
+    assert not any(a["host"] == "BTS-07" for a in no_alias)  # 别名才是切源关键
+
+    # ② 配置别名：OSS 列名 → 规范列名
+    aliases = {
+        "time": "Timestamp", "enodeb id": "CellID", "lte_rsrp": "RSRP",
+        "lte_rsrq": "RSRQ", "sinr": "SNR", "cqi": "CQI", "rssi": "RSSI",
+        "dl_throughput": "DL_bitrate", "ul_throughput": "UL_bitrate",
+        "packet_loss": "PINGLOSS",
+    }
+    adp = FiveGKpiAdapter({"dataset_path": str(d), "column_aliases": aliases})
+    alerts = adp.load_dataset_alerts()
+    assert len(alerts) == 8            # 8 个超阈指标（含 RSSI）
+    assert all(a["host"] == "BTS-07" for a in alerts)
+    by_metric = {a["metric"]: a["severity"] for a in alerts}
+    assert by_metric["rsrp_dbm"] == "critical"
+    assert by_metric["rsrq_db"] == "major"
+    assert by_metric["ping_loss_pct"] == "critical"
+    # 时间戳经别名映射后也能正常规整
+    assert alerts[0]["ts"] == "2026-09-25T13:40:00Z"
+    # healthcheck 抽样同样走别名（dataset 模式）
+    assert adp.healthcheck()["mode"] == "dataset"

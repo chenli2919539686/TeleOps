@@ -21,5 +21,52 @@
       "rsrp_dbm": { "warn": -110.0, "major": -115.0, "critical": -120.0 },
       "sinr_db":  { "warn": 0.0, "major": -3.0, "critical": -6.0 }
     }
+  },
+
+  "_oss_example": {
+    "_notes": "OSS / 网管导出接入模板（真实电信高保真源）。复制本段为顶层键 'alert-5g' 即可切源，无需改代码。",
+    "_expected_schema": {
+      "format": "CSV（Excel 导出请先另存为 CSV；如确需 xlsx 可再补 loader）",
+      "required_columns": [
+        "小区标识列（映射到 CellID，如 Cell ID / eNodeB ID / gNodeB ID / CI）",
+        "时间戳列（映射到 Timestamp，如 2026-09-25 13:40:00）",
+        "无线 KPI 列（映射到 RSRP/RSRQ/SNR/CQI/RSSI 等，越低越差）",
+        "吞吐/丢包列（如 DL/UL Throughput、Packet Loss，越低越差 或 丢包越高越差）"
+      ],
+      "optional_columns": [
+        "拓扑列（站号、频点、邻区关系）—— 当前 loader 仅透传进 tags，根因可用",
+        "告警事件列（alarm type/severity）—— 如需直接喂告警而非 KPI 超阈，走 parse_webhook 批量形态"
+      ]
+    },
+    "alert-5g": {
+      "dataset_path": "data/oss_export/cells_2026-09.csv",
+      "min_severity": "major",
+      "thresholds": {
+        "rsrp_dbm": { "warn": -110.0, "major": -115.0, "critical": -120.0 },
+        "rsrq_db":  { "warn": -15.0, "major": -18.0, "critical": -21.0 },
+        "sinr_db":  { "warn": 0.0, "major": -3.0, "critical": -6.0 },
+        "cqi":      { "warn": 8.0, "major": 5.0, "critical": 3.0 },
+        "dl_throughput_mbps": { "warn": 30.0, "major": 15.0, "critical": 5.0 },
+        "ping_loss_pct": { "warn": 1.0, "major": 3.0, "critical": 5.0 }
+      },
+      "column_aliases": {
+        "cell id": "CellID",
+        "cell_id": "CellID",
+        "enodeb id": "CellID",
+        "gnodeb id": "CellID",
+        "ci": "CellID",
+        "rsrp(dbm)": "RSRP",
+        "lte_rsrp": "RSRP",
+        "rsrq(db)": "RSRQ",
+        "sinr(db)": "SNR",
+        "cqi": "CQI",
+        "dl throughput(mbps)": "DL_bitrate",
+        "ul throughput(mbps)": "UL_bitrate",
+        "packet loss(%)": "PINGLOSS",
+        "packet_loss": "PINGLOSS",
+        "time": "Timestamp",
+        "datetime": "Timestamp"
+      }
+    }
   }
 }

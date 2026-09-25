@@ -119,12 +119,21 @@ def _severity_for(value: float, spec: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def iter_rows(path: str, limit: Optional[int] = None) -> Iterator[Dict[str, str]]:
+def iter_rows(path: str, limit: Optional[int] = None,
+              aliases: Optional[Dict[str, str]] = None) -> Iterator[Dict[str, str]]:
     """遍历数据集（文件 / 目录 / glob）下的 CSV 行。自动跳过 __MACOSX 与 .DS_Store。
 
     path 支持：单个 .csv、一个目录（递归 **/*.csv）、或 glob 表达式。
     返回每行原始 dict（键已规整为规范列名）。
+
+    aliases：可选，列名映射覆盖（raw 小写 → 规范列名），用于接不同厂商 OSS 导出
+    （如华为/中兴/爱立信的列名差异）。与内置 _COLUMN_ALIASES 合并，覆盖优先。
+    例：{"lte_rsrp": "RSRP", "enodeb_id": "CellID"}。
     """
+    amap = dict(_COLUMN_ALIASES)
+    if aliases:
+        amap.update({str(k).strip().lower(): str(v).strip() for k, v in aliases.items()})
+
     files: List[str] = []
     if os.path.isdir(path):
         files = sorted(_glob.glob(os.path.join(path, "**", "*.csv"), recursive=True))
@@ -138,8 +147,9 @@ def iter_rows(path: str, limit: Optional[int] = None) -> Iterator[Dict[str, str]
         try:
             with open(fp, "r", encoding="utf-8-sig", newline="") as fh:
                 reader = csv.DictReader(fh)
-                # 规整表头
-                reader.fieldnames = [_norm_col(c) for c in (reader.fieldnames or [])]
+                # 规整表头（用合并后的别名表）
+                reader.fieldnames = [amap.get(c.strip().lower(), c.strip())
+                                    for c in (reader.fieldnames or [])]
                 for row in reader:
                     if limit is not None and count >= limit:
                         return
@@ -210,9 +220,13 @@ def row_to_payloads(row: Dict[str, Any], specs: Optional[Dict[str, Dict[str, Any
 
 def load_payloads(path: str, limit: Optional[int] = None,
                   specs: Optional[Dict[str, Dict[str, Any]]] = None,
-                  min_severity: str = "info") -> List[Dict[str, Any]]:
-    """便利函数：整个数据集 → 全部告警 payload（按行序）。"""
+                  min_severity: str = "info",
+                  aliases: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """便利函数：整个数据集 → 全部告警 payload（按行序）。
+
+    aliases：列名映射覆盖（见 iter_rows），用于接不同厂商 OSS 导出。
+    """
     out: List[Dict[str, Any]] = []
-    for row in iter_rows(path, limit=limit):
+    for row in iter_rows(path, limit=limit, aliases=aliases):
         out.extend(row_to_payloads(row, specs, min_severity=min_severity))
     return out

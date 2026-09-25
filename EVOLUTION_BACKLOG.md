@@ -30,8 +30,12 @@
 1. **真实电信数据接入（首切已落地，剩一项收尾）**
    - ✅ 数据源已定 `uccmisl/5Gdataset` 并打通「真实 KPI → 根因」管线（v0.8.37）。
    - ✅ **① 量化评估基准** 已落地（v0.8.38，见下「已收工」）。
-   - ② **OSS 导出高保真源**：等用户给一份真实 OSS/网管导出（小区级 KPI+告警+拓扑），
-     只需在 `data/adapters.json[alert-5g]` 补列映射 + 改 `dataset_path`，loader 复用、零返工。
+   - ② **OSS 导出高保真源**：等用户给一份真实 OSS/网管导出（小区级 KPI+告警+拓扑）。
+     **切源能力已就绪（零代码）**：`FiveGKpiAdapter` 支持 `data/adapters.json[alert-5g].column_aliases`
+     运行时覆盖列名映射（华为/中兴/爱立信列名差异），`fiveg_dataset.load_payloads` 已透传；
+     模板示例见 `data/adapters.example.json` 的 `_oss_example`（含期望 schema + 别名映射样例）。
+     **剩余动作**：用户给导出文件（CSV）→ 在 `alert-5g` 填 `dataset_path` + `column_aliases` 即切源；
+     若导出为 Excel 再补 loader 的 xlsx 支持。测试 `test_fiveg_oss_column_aliases_override` 锁死该行为。
 2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）
    - 依赖真实数据先有；前端大屏加统计卡片（对齐 TelcoNet 的可量化说服力）。
 3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki）

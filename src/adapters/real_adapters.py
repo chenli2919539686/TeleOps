@@ -351,15 +351,26 @@ class FiveGKpiAdapter(AlertAdapter):
     system = "5G 网管 / OSS（小区级 KPI）"
     direction = NORTH
     status = "sample"
-    description = "把 5G 小区 KPI（RRC 建立成功率/PRB 利用率/丢包率等）超阈转成内核统一 Alert；配置 alert-5g 后接真实数据集。"
+    description = "把 5G 小区 KPI（RRC 建立成功率/PRB 利用率/丢包率等）超阈转成内核统一 Alert；配置 alert-5g 后接真实数据集或 OSS 导出。"
+
+    # 配置 data/adapters.json[alert-5g] 的字段：
+    #   dataset_path  : 数据集文件/目录/glob（如 data/5g_dataset 或 OSS 导出的 CSV）
+    #   min_severity  : 严重度下限（真实数据噪声大，常用 "major" 滤掉健康波动=噪声抑制）
+    #   thresholds    : 可选，按指标覆盖 METRIC_SPECS 的边界
+    #   column_aliases: 可选，列名映射覆盖（raw 小写 → 规范列名），接不同厂商 OSS 导出
+    #                   （华为/中兴/爱立信列名差异），纯配置切源、零返工。详见
+    #                   data/adapters.example.json 的 _oss_example 模板。
 
     def __init__(self, config: Optional[dict] = None):
         # 真实数据源配置（data/adapters.json[alert-5g]）：
         #   dataset_path : 数据集文件/目录/glob（如 data/5g_dataset）
         #   thresholds   : 可选，按指标覆盖 METRIC_SPECS 的边界（good/warn/major/critical）
+        #   column_aliases: 可选，列名映射覆盖（raw 小写 → 规范列名），用于接不同厂商
+        #                  OSS 导出（华为/中兴/爱立信列名差异），无需改代码即可切源
         cfg = config or {}
         self._config = cfg
         self.dataset_path: str = (cfg.get("dataset_path") or "").strip()
+        self._aliases = cfg.get("column_aliases") or None
         self._specs = dict(_ds.METRIC_SPECS)
         for metric, bounds in (cfg.get("thresholds") or {}).items():
             if metric in self._specs and isinstance(bounds, dict):
@@ -442,12 +453,16 @@ class FiveGKpiAdapter(AlertAdapter):
 
         min_severity：严重度下限（默认取自配置 min_severity，否则 info=全部）。
         真实数据集噪声大，建议用 "major" 过滤掉 warning，避免健康波动刷屏。
+
+        列名映射：data/adapters.json[alert-5g].column_aliases 会覆盖内置别名表，
+        用于接不同厂商 OSS 导出（华为/中兴/爱立信列名差异），无需改代码即可切源。
         """
         ds = (path or self.dataset_path or "").strip()
         if not ds:
             return []
         floor = min_severity or self._config.get("min_severity") or "info"
-        payloads = _ds.load_payloads(ds, limit=limit, specs=self._specs, min_severity=floor)
+        payloads = _ds.load_payloads(ds, limit=limit, specs=self._specs,
+                                     min_severity=floor, aliases=self._aliases)
         return [self.to_unified(p) for p in payloads]
 
     def healthcheck(self) -> Dict[str, Any]:
@@ -456,7 +471,8 @@ class FiveGKpiAdapter(AlertAdapter):
            (self.dataset_path and os.path.isdir(self.dataset_path)):
             n = 0
             try:
-                n = len(_ds.load_payloads(self.dataset_path, limit=2000, specs=self._specs))
+                n = len(_ds.load_payloads(self.dataset_path, limit=2000, specs=self._specs,
+                                      aliases=self._aliases))
             except Exception:  # noqa: BLE001
                 n = 0
             return {"reachable": True, "mode": "dataset", "dataset_path": self.dataset_path,
