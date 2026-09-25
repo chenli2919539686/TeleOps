@@ -24,30 +24,47 @@ import time
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
-# 剧本里能循环编排的接入域故障：
+# 剧本里能循环编排的接入域故障（已重主题为 5G 电信语境）：
 # 这些告警的 message 会让根因推理（Mock/真实 LLM 一致）推荐库内缺失的工具，
 # 从而演示 缺工具 → 研发造 → 运维复用 的完整闭环。
+# 注意：触发"造工具"的关键词（光功率/光模块/optical、温度/过热、端口/错包）与
+# tags（access/optical、compute/temperature、switch）必须保留，否则闭环退化。
 FAULT_ALERTS: List[dict] = [
     {
         "alert_id": "A-ONU", "ts": "", "source": "zabbix",
-        "metric": "optical_power", "host": "onu-1", "severity": "major",
+        "metric": "optical_power", "host": "gNodeB-ONU-1", "severity": "major",
         "value": "-28dBm",
-        "message": "ONU 光模块接收光功率低于阈值，疑似光路劣化",
-        "tags": ["access", "optical"], "is_noise": False,
+        "message": "5G 前传 ONU 光模块接收光功率低于阈值（-28dBm），疑似前传光路/光模块劣化",
+        "tags": ["access", "optical", "fronthaul"], "is_noise": False,
     },
     {
         "alert_id": "A-TEMP", "ts": "", "source": "zabbix",
-        "metric": "temperature", "host": "host-1", "severity": "critical",
+        "metric": "temperature", "host": "BBU-1", "severity": "critical",
         "value": "88C",
-        "message": "物理机 host-1 核心温度过热告警，疑似散热故障",
-        "tags": ["compute", "temperature"], "is_noise": False,
+        "message": "BBU 基带板核心温度过热告警（88°C），疑似散热故障或载波负载过高",
+        "tags": ["compute", "temperature", "core"], "is_noise": False,
     },
     {
         "alert_id": "A-PORT", "ts": "", "source": "zabbix",
-        "metric": "ifInErrors", "host": "switch-3", "severity": "major",
+        "metric": "ifInErrors", "host": "SW-TRANSPORT-3", "severity": "major",
         "value": "1200",
-        "message": "上联端口入向错包激增，疑似光模块或链路问题",
-        "tags": ["switch"], "is_noise": False,
+        "message": "5G 承载交换机上联端口入向错包激增，疑似前传/回传链路或光模块问题",
+        "tags": ["switch", "transport"], "is_noise": False,
+    },
+    # 以下两条为 5G 核心网 RCA 故事线（不触发造工具，仅展示根因推理多样性）
+    {
+        "alert_id": "A-AMF", "ts": "", "source": "prometheus",
+        "metric": "amf_cpu", "host": "AMF-1", "severity": "major",
+        "value": "93%",
+        "message": "AMF 网元 CPU/内存过载，终端注册成功率下降至 82%，疑似控制面容量不足",
+        "tags": ["core", "control-plane"], "is_noise": False,
+    },
+    {
+        "alert_id": "A-UPF", "ts": "", "source": "prometheus",
+        "metric": "upf_session_drop", "host": "UPF-1", "severity": "major",
+        "value": "3.5%",
+        "message": "UPF 用户面会话掉线率突增（3.5%），疑似用户面链路拥塞或容量瓶颈",
+        "tags": ["core", "user-plane"], "is_noise": False,
     },
 ]
 

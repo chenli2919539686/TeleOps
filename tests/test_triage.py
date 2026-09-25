@@ -148,9 +148,11 @@ def test_real_dataset_verdict_unchanged():
 
     noise = sum(1 for a in alerts if rule_triage(a) is True)
     real = sum(1 for a in alerts if rule_triage(a) is False)
-    assert len(alerts) == 55
-    assert noise == 52
-    assert real == 3
+    # 注：data/alerts.json 已重主题为 5G 电信样本（原 BGL 超算样本备份于
+    # data/alerts.bgl_backup.json）。以下为当前 5G 数据集的判定分布；改动数据集时同步更新。
+    assert len(alerts) == 24
+    assert noise == 22
+    assert real == 2
 
 
 def test_mock_triage_matches_rule_layer():

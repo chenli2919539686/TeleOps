@@ -18,7 +18,7 @@ router = APIRouter()
 
 @router.get("/alerts")
 def list_alerts(severity: str = "", noise: str = "", q: str = "", limit: int = 200):
-    """列出「接入业务预设」的真实告警样本（data/alerts.json，BlueGene/L 机群事件）。
+    """列出「接入业务预设」的真实告警样本（data/alerts.json，5G 电信运维场景）。
 
     支持过滤：severity=info|critical、noise=true|false、q=关键字，供前端告警浏览器与调试使用。
     """
@@ -41,7 +41,7 @@ def list_alerts(severity: str = "", noise: str = "", q: str = "", limit: int = 2
                   if ql in " ".join(str(a.get(k, "")) for k in ("alert_id", "metric", "host", "message")).lower()]
     return {
         "total": len(alerts),
-        "source": "data/alerts.json · BlueGene/L 机群日志样本",
+        "source": "data/alerts.json · 5G 电信运维场景样本",
         "summary": {"all": len(data.get("alerts", [])), "severity": sev_cnt, "noise": noise_cnt},
         "alerts": alerts[: max(1, min(limit, 500))],
     }

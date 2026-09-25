@@ -96,3 +96,10 @@
 - 剩余非阻塞增强（均已无代码阻塞，纯等时机）：
   - **真实 OSS 归档导出**（另一条独立线，与 OIDC/审计导出同一「配置驱动 + mock 兜底」哲学；用户给目标即接）。
 - 价值最高的外部数据阻塞项仍是：**真实 OSS/网管导出源**（卡用户给文件，零代码切源）+ **MTTR 真·数值**（卡真实工单闭环数据）。
+- **演示收尾打磨已做（v0.8.49）**：`scripts/demo.py` 一条命令拉起演示（起后端→注册 interviewer 账号→进个人域→
+  启动 5G 实时告警流→开浏览器）+ `docs/12-一键演示与走查.md`（电梯演讲/点击路径/无网降级/边界兜底）；
+  演示数据重主题为 5G（`data/alerts.json` 噪声样本 + `src/core/alert_stream.py` 的 `FAULT_ALERTS` 故障剧本，
+  原 BGL 超算样本备份 `data/alerts.bgl_backup.json`）。`test_triage` 数据集期望已同步更新。
+- **已知预存测试失败（非本次引入，未修）**：`tests/test_monitoring_tools.py` 7 例因本机
+  `tools/pull_metrics.py` / `tools/pull_logs.py` 等基线生成脚本为旧版契约（返回无 `status`/`mode`/`series`），
+  与测试断言不匹配；这些工具脚本未进 git 跟踪、由 dev Agent 运行时生成，需在对应生成逻辑或测试契约处单独修，不属演示打磨范围。
