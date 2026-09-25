@@ -1,16 +1,23 @@
-"""闭环验证脚本（离线 · 仿真）。
+"""闭环验证脚本（离线 · 仿真 + 真实根因基准）。
 
-直接回答「没有真实系统能不能验证」：
-  - 诊断段：用「已知真实根因」的标注故障离线验证（不需要活系统）。
+回答「没有真实系统能不能验证」：
+  - 诊断段：用合成注入故障（5G KPI，带 known root cause）跑真实运维 Agent 根因，
+    算 Top-1 准确率 + 噪声抑制率。predictor 默认 "stub"（离线确定性，验证
+    taxonomy+matcher+管线）；--live 接真实 DeepSeek 算真根因准确率（耗 API）。
+    ⚠️ 历史版本用关键词匹配器 diagnose() 绕过真实 Agent，给出的 0.875/1.0 是
+       假指标；本版改为真实 Agent + 真实 rule_triage 降噪层，并诚实标注 verify_mode。
   - 修复段：把 Agent 推荐的修复动作作用到仿真靶机（src/sim/target_env.py），
     看靶机是否恢复到健康线，从而验证「方案能否成功」——明确标注 simulated。
 
 产出：data/eval_results.json（给前端指标看板 /metrics/summary 读取）+ 控制台摘要。
 
-运行：python scripts/eval_closed_loop.py
+运行：
+  python scripts/eval_closed_loop.py            # 默认 stub（离线、免费、CI 可跑）
+  python scripts/eval_closed_loop.py --live     # 真实 DeepSeek 根因（需 DEEPSEEK_API_KEY）
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -22,13 +29,12 @@ from typing import Dict, List
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.sim.target_env import SimTargetEnv, HEALTHY_THRESHOLDS
+from src.eval.rootcause_bench import run_benchmark
 
 # ---------------------------------------------------------------------------
-# 标注故障集（telecom 风格，真实根因已知）
-#   true_root   : 该故障的真实根因（用于核算 Top-1 准确率）
-#   correct_action : 正确修复动作（作用到靶机的键，见 _ACTION_EFFECTS）
-#   is_noise    : 是否为可抑制的噪声告警（用于核算噪声抑制率）
-#   init_state  : 靶机初始指标（异常态）
+# 标注故障集（IT 域，真实根因已知）—— 仅用于「修复动作→仿真靶机」闭环验证（simulated）。
+#   注意：根因 Top-1 准确率与噪声抑制率已由 src/eval/rootcause_bench 用 5G 合成故障真实算出，
+#        本集不再用作根因评估（避免与真实 Agent 脱钩的假指标）。
 # ---------------------------------------------------------------------------
 INCIDENTS: List[Dict] = [
     {"id": "INC-01", "text": "db-02 根分区使用率 96%，磁盘空间不足", "true_root": "disk_full",
@@ -70,114 +76,91 @@ INCIDENTS: List[Dict] = [
      "init_state": {"cert_days_left": 30.0}},
 ]
 
-# 规则诊断（确定性、离线可跑；有真实 LLM 时可替换为本体重链路）
-_ROOT_KEYWORDS = [
-    ("disk_full", ["磁盘", "disk", "空间", "inode", "分区"]),
-    ("high_cpu", ["cpu", "负载", "利用率"]),
-    ("oom", ["oom", "内存", "mem", "killer"]),
-    ("optical", ["光功率", "optical", "光路", "光模块"]),
-    ("cert_expiry", ["证书", "cert", "过期"]),
-    ("overheat", ["温度", "temp", "过热", "散热"]),
-    ("packet_loss", ["丢包", "packet", "抖动", "延迟"]),
-    ("port_error", ["错包", "端口", "port", "上联"]),
-]
-
-
-def diagnose(text: str) -> str:
-    """规则根因匹配：返回预测根因键。"""
-    low = (text or "").lower()
-    for root, kws in _ROOT_KEYWORDS:
-        if any(kw.lower() in low for kw in kws):
-            return root
-    return "unknown"
-
-
 # 仿真决策时延（标注为 simulated，仅演示闭环节拍）
 _DIAGNOSE_S = 5.0
 _REMEDIATE_S = 10.0
 
 
-def run_eval() -> Dict:
+def run_eval(predictor: str = "stub", error_rate: float = 0.0) -> Dict:
+    # ---- 诊断段 + 噪声抑制段：真实基准（5G 合成故障，真实 Agent + 真实 rule_triage）----
+    bench = run_benchmark(predictor=predictor, error_rate=error_rate)
+    bench["generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # ---- 修复段：仿真靶机闭环（IT 域，simulated）----
     actionable = [i for i in INCIDENTS if not i["is_noise"]]
-    noise = [i for i in INCIDENTS if i["is_noise"]]
-
-    top1_hits = 0
     remediation_ok = 0
-    noise_filtered = 0
     latencies: List[float] = []
-    details: List[Dict] = []
-
-    for inc in INCIDENTS:
-        predicted = diagnose(inc["text"])
-        # 降噪层：噪声告警直接抑制（不进入根因/修复）
-        if inc["is_noise"]:
-            suppressed = (predicted != "unknown")  # 即便能识别也为噪声，应被抑制
-            # 这里以 is_noise 标记代表降噪层判定；真实链路由告警流 triage 完成
-            noise_filtered += 1
-            details.append({"id": inc["id"], "noise": True, "suppressed": True,
-                            "predicted_root": predicted, "true_root": inc["true_root"]})
-            continue
-
-        top1 = (predicted == inc["true_root"])
-        top1_hits += int(top1)
-
+    remediation_details: List[Dict] = []
+    for inc in actionable:
         t0 = time.time()
         env = SimTargetEnv(init_state=inc["init_state"])
-        # diagnose 段（离线标注， latency 仅作节拍）
-        time.sleep(0.0)
         res = env.apply(inc["correct_action"])
         dt = time.time() - t0
         recovered = bool(res["recovered"])
         remediation_ok += int(recovered)
-        latencies.append(_DIAGNOSE_S + _REMEDIATE_S)  # 仿真决策时延
-        details.append({
-            "id": inc["id"], "noise": False, "predicted_root": predicted,
-            "true_root": inc["true_root"], "top1": top1,
-            "action": inc["correct_action"], "recovered": recovered,
+        latencies.append(_DIAGNOSE_S + _REMEDIATE_S)
+        remediation_details.append({
+            "id": inc["id"], "action": inc["correct_action"], "recovered": recovered,
             "state_before": res["before"], "state_after": res["after"],
             "decision_latency_s": round(_DIAGNOSE_S + _REMEDIATE_S, 1),
         })
 
     n_act = max(1, len(actionable))
-    n_noise = max(1, len(noise))
     metrics = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "generated_at": bench["generated_at"],
         "env_label": "simulated · 仿真靶机（非生产验证）",
-        "verify_mode": {
-            "diagnosis": "offline-labeled · 用已知真实根因的标注故障验证",
-            "remediation": "simulated · 修复动作作用于仿真靶机验证",
-        },
+        "verify_mode": bench["verify_mode"],
+        "predictor": bench["predictor"],
+        "agent_smoke_ok": bench["agent_smoke_ok"],
+        "samples": bench["samples"],
+        # 诊断/降噪（真实）
         "total_incidents": len(INCIDENTS),
         "actionable": len(actionable),
-        "noise": len(noise),
-        "root_cause_top1_accuracy": round(top1_hits / n_act, 3),
-        "noise_suppression_rate": round(noise_filtered / n_noise, 3),
+        "noise": len(INCIDENTS) - len(actionable),
+        "root_cause_top1_accuracy": bench["root_cause_top1_accuracy"],
+        "root_cause_top1_accuracy_position": bench["root_cause_top1_accuracy_position"],
+        "noise_suppression_rate": bench["noise_suppression_rate"],
+        "rootcause_details": bench["rootcause_details"],
+        "noise_details": bench["noise_details"],
+        # 修复（仿真）
         "remediation_success_rate_sim": round(remediation_ok / n_act, 3),
         "avg_decision_latency_s": round(sum(latencies) / max(1, len(latencies)), 1),
         "healthy_thresholds": HEALTHY_THRESHOLDS,
-        "details": details,
+        "remediation_details": remediation_details,
     }
     return metrics
 
 
 def main():
-    metrics = run_eval()
+    ap = argparse.ArgumentParser(description="TeleOps 闭环验证（离线·仿真 + 真实根因基准）")
+    ap.add_argument("--live", action="store_true",
+                    help="接真实 DeepSeek 算根因 Top-1（需 DEEPSEEK_API_KEY，耗 API）")
+    ap.add_argument("--error-rate", type=float, default=0.0,
+                    help="stub 预测器注入错误标签的比例（模拟不完美推理，默认 0）")
+    args = ap.parse_args()
+
+    predictor = "agent" if args.live else "stub"
+    metrics = run_eval(predictor=predictor, error_rate=args.error_rate)
+
     out = Path("data/eval_results.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("=" * 60)
-    print("TeleOps 闭环验证（离线 · 仿真）")
-    print("=" * 60)
-    print(f"诊断验证口径 : {metrics['verify_mode']['diagnosis']}")
-    print(f"修复验证口径 : {metrics['verify_mode']['remediation']}")
-    print("-" * 60)
-    print(f"根因 Top-1 准确率   : {metrics['root_cause_top1_accuracy']*100:.1f}%  "
-          f"({metrics['actionable']} 条可处置故障)")
-    print(f"噪声抑制率         : {metrics['noise_suppression_rate']*100:.1f}%  "
-          f"({metrics['noise']} 条噪声告警)")
-    print(f"修复成功率(仿真)   : {metrics['remediation_success_rate_sim']*100:.1f}%")
-    print(f"平均决策时延(仿真) : {metrics['avg_decision_latency_s']} s")
-    print("=" * 60)
+
+    print("=" * 64)
+    print("TeleOps 闭环验证（离线 · 仿真 + 真实根因基准）")
+    print("=" * 64)
+    print(f"诊断口径   : {metrics['verify_mode']['diagnosis']}")
+    print(f"修复口径   : {metrics['verify_mode']['remediation']}")
+    print(f"Agent 冒烟 : {'OK' if metrics['agent_smoke_ok'] else 'FAIL'}")
+    print("-" * 64)
+    print(f"根因 Top-1 准确率(置信度) : {metrics['root_cause_top1_accuracy']*100:.1f}%  "
+          f"({metrics['samples']['actionable']} 条可处置故障)")
+    print(f"根因 Top-1 准确率(位置)   : {metrics['root_cause_top1_accuracy_position']*100:.1f}%")
+    print(f"噪声抑制率               : {metrics['noise_suppression_rate']*100:.1f}%  "
+          f"({metrics['samples']['noise']} 条噪声告警)")
+    print(f"修复成功率(仿真)          : {metrics['remediation_success_rate_sim']*100:.1f}%")
+    print(f"平均决策时延(仿真)        : {metrics['avg_decision_latency_s']} s")
+    print("=" * 64)
     print(f"结果已写入 {out}")
 
 

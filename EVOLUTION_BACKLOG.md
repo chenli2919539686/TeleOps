@@ -15,13 +15,21 @@
   `src/adapters/fiveg_dataset.py` 加载器（列名容错 + 按指标方向阈值，解决 RSRP/RSRQ/SNR「越低越差」反算）
   + `FiveGKpiAdapter.load_dataset_alerts`；`scripts/fetch_5g_dataset.py` 取数、`scripts/replay_5g_dataset.py`
   回放到 `/adapters/alert/ingest` → 运维 Agent 根因。测试 `tests/test_adapters_real.py`（含 5G 共 19 例）。
-  剩余：① 量化评估基准（注入故障算 Top-1/噪声抑制，联动下项）；② OSS 导出高保真源（用户给文件后改 adapter 配置即切）。
+  剩余：① 量化评估基准 **✅ 已落地（v0.8.38，见下「已收工」）**；② OSS 导出高保真源（用户给文件后改 adapter 配置即切）。
+
+- **量化评估基准（v0.8.38）**：`src/eval/rootcause_bench.py` **真正接 `OpsAgent` + 真实 triage 降噪层**，
+  5G 合成故障注入器造带 `true_root` 标签小样本（4 类退化模式：弱覆盖 / 干扰 / 传输丢包 / 拥塞，特征可区分，
+  避免 stub 退化成标签对标签的平凡正确），算**置信度口径 + 位置口径双 Top-1** 与**真实噪声抑制率**，
+  并诚实标注 `verify_mode`（offline-stub / live-agent / simulated 修复仿真）。重写
+  `scripts/eval_closed_loop.py` 接真实基准、删掉旧 `diagnose()` 假匹配器，加 `--live` / `--error-rate`；
+  新增 `tests/test_eval_rootcause_bench.py` 7 例（taxonomy 自洽 / 合成样本形状 / 指标敏感 / verify_mode 诚实）。
+  前端 `/metrics/summary` 读 `data/eval_results.json` 现显示**真·指标**，替换旧 0.875/1.0 假值。
+  零回归：全量 204 passed（含 triage 11 + eval 7）。
 
 ## ❌ 待完善（建议推进序）
-1. **真实电信数据接入（首切已落地，剩两项收尾）**
+1. **真实电信数据接入（首切已落地，剩一项收尾）**
    - ✅ 数据源已定 `uccmisl/5Gdataset` 并打通「真实 KPI → 根因」管线（v0.8.37）。
-   - ① **量化评估基准**：用 ns-3 或合成注入故障造带根因标签的小样本，跑 Agent 算 Top-1 准确率 +
-     噪声抑制率（即下一项 P0-2，二者绑定）。
+   - ✅ **① 量化评估基准** 已落地（v0.8.38，见下「已收工」）。
    - ② **OSS 导出高保真源**：等用户给一份真实 OSS/网管导出（小区级 KPI+告警+拓扑），
      只需在 `data/adapters.json[alert-5g]` 补列映射 + 改 `dataset_path`，loader 复用、零返工。
 2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）
