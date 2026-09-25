@@ -100,6 +100,14 @@
   启动 5G 实时告警流→开浏览器）+ `docs/12-一键演示与走查.md`（电梯演讲/点击路径/无网降级/边界兜底）；
   演示数据重主题为 5G（`data/alerts.json` 噪声样本 + `src/core/alert_stream.py` 的 `FAULT_ALERTS` 故障剧本，
   原 BGL 超算样本备份 `data/alerts.bgl_backup.json`）。`test_triage` 数据集期望已同步更新。
-- **已知预存测试失败（非本次引入，未修）**：`tests/test_monitoring_tools.py` 7 例因本机
-  `tools/pull_metrics.py` / `tools/pull_logs.py` 等基线生成脚本为旧版契约（返回无 `status`/`mode`/`series`），
-  与测试断言不匹配；这些工具脚本未进 git 跟踪、由 dev Agent 运行时生成，需在对应生成逻辑或测试契约处单独修，不属演示打磨范围。
+- **方法论验收文档已出（v0.8.49）**：`docs/13-方法论验收文档.md`——整合 ADR×10 / RACI / 风险登记册 /
+  数据字典（11 表 + 文件存储 + `TELEOPS_*` 变量）/ 三环境策略 / 质量门 / 验收清单，专为求职验收与面试讲述收敛。
+  测试套件事实：共 282 个测试函数（pytest 节点约 410，含参数化），约 6–12 个 Redis/PG 依赖用例本地自动 skip；
+  全量跑有 2 个已知**共享 session-DB 执行 flake**（`test_audit_export::test_export_admin_sees_all_but_user_isolated`
+  + `test_oss_export::test_archive_json_format`，`sqlite3.OperationalError`，隔离跑绿），属测试隔离问题非产品缺陷。
+- **测试基线笔记纠正（覆盖旧误记）**：先前把 `test_monitoring_tools` 7 例失败记为「预存」不准确——
+  实为演示运行期 dev Agent 重写基线 `tools/pull_metrics.py`/`pull_logs.py` 旧契约所致，`git checkout --` 还原后
+  19 例全绿（**非预存，是运行副作用**）。当前唯一已知 flake 是上面两条导出测试的共享-DB 争用，
+  修复方向=改独立 DB fixture（待办，不属产品缺陷）。
+- **真实 GitHub Actions CI 仍缺失**：`.github/` 未建，质量门靠本地 + 手动全量跑；`docs/13` §6.3 已列目标门禁
+  （lint/type/test/密钥扫描/构建），落地后接 service 容器跑 Redis/PG 分支。
