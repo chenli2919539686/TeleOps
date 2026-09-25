@@ -810,8 +810,8 @@ async function oidcLoginFlow() {
 }
 
 // ================= 指标看板（闭环量化） =================
-function _metricCard(label, val, pct, sub) {
-  const cls = pct >= 90 ? "good" : pct >= 70 ? "mid" : "low";
+function _metricCard(label, val, pct, sub, pending) {
+  const cls = pending ? "pending" : (pct >= 90 ? "good" : pct >= 70 ? "mid" : "low");
   return `<div class="mcard ${cls}">
     <div class="mcard-val">${val}</div>
     <div class="mcard-label">${label}</div>
@@ -824,26 +824,68 @@ async function renderMetrics() {
   try {
     const d = await apiFetch("/metrics/summary").then(r => r.json());
     const ev = d.eval || {};
-    cards.innerHTML = _metricCard("根因 Top-1 准确率", (ev.root_cause_top1_accuracy * 100).toFixed(1) + "%",
-        ev.root_cause_top1_accuracy * 100, "诊断段·离线标注验证")
-      + _metricCard("噪声抑制率", (ev.noise_suppression_rate * 100).toFixed(1) + "%",
-        ev.noise_suppression_rate * 100, "降噪层过滤占比")
-      + _metricCard("修复成功率（仿真）", (ev.remediation_success_rate_sim * 100).toFixed(1) + "%",
-        ev.remediation_success_rate_sim * 100, "修复段·仿真靶机验证")
-      + _metricCard("平均决策时延", (ev.avg_decision_latency_s || "—") + "s", 80, "仿真决策节拍");
-    live.innerHTML = `<div class="metrics-live-row">实时：活跃告警流 <b>${d.live.active_streams}</b> · 适配器 <b>${d.live.adapters}</b> · 工具 <b>${d.live.tools}</b></div>`
-      + `<div class="metrics-note">验证口径：${escapeHtml(d.env_note || "")} ｜ ${escapeHtml(ev.env_label || "")}</div>`;
-    if (ev.details) {
-      detail.innerHTML = `<h3>评估明细（${ev.total_incidents} 条）</h3><table class="audit-table"><thead>`
-        + `<tr><th>ID</th><th>预测根因</th><th>真实根因</th><th>Top-1</th><th>动作</th><th>恢复</th></tr></thead><tbody>`
-        + ev.details.map((x) => `<tr class="${x.noise ? "row-noise" : ""}">
-          <td>${escapeHtml(x.id)}</td>
-          <td>${escapeHtml(x.predicted_root || "—")}</td>
-          <td>${escapeHtml(x.true_root || "—")}</td>
-          <td>${x.noise ? "噪声" : (x.top1 ? "✅" : "❌")}</td>
-          <td>${escapeHtml(x.action || "—")}</td>
-          <td>${x.noise ? "—" : (x.recovered ? "✅" : "❌")}</td>
-        </tr>`).join("") + `</tbody></table>`;
+    const acc = (ev.samples && ev.samples.actionable) || 0;
+    const noise = (ev.samples && ev.samples.noise) || 0;
+    const top1 = (ev.root_cause_top1_accuracy != null ? ev.root_cause_top1_accuracy * 100 : null);
+    const top1pos = (ev.root_cause_top1_accuracy_position != null ? ev.root_cause_top1_accuracy_position * 100 : null);
+    const noiseRate = (ev.noise_suppression_rate != null ? ev.noise_suppression_rate * 100 : null);
+    const repair = (ev.remediation_success_rate_sim != null ? ev.remediation_success_rate_sim * 100 : null);
+
+    // ---- 卡片网格：真·根因双口径 + 噪声 + 修复(仿真) + 决策时延 + MTTR(占位) ----
+    cards.innerHTML =
+      _metricCard("根因 Top-1（置信度口径）", top1 != null ? top1.toFixed(1) + "%" : "—",
+        top1 != null ? top1 : 0, `诊断段·${acc} 条可处置故障`)
+      + _metricCard("根因 Top-1（位置口径）", top1pos != null ? top1pos.toFixed(1) + "%" : "—",
+        top1pos != null ? top1pos : 0, "hypotheses[0] 即首条")
+      + _metricCard("噪声抑制率", noiseRate != null ? noiseRate.toFixed(1) + "%" : "—",
+        noiseRate != null ? noiseRate : 0, `${noise} 噪声 / 共 ${acc + noise} 样本`)
+      + _metricCard("修复成功率（仿真）", repair != null ? repair.toFixed(1) + "%" : "—",
+        repair != null ? repair : 0, "修复段·仿真靶机")
+      + _metricCard("仿真决策时延", (ev.avg_decision_latency_s != null ? ev.avg_decision_latency_s : "—") + "s",
+        80, "诊断+处置节拍")
+      + (ev.mttr_minutes != null
+          ? _metricCard("平均修复时长 MTTR", ev.mttr_minutes + "min", 80, "真实工单闭环")
+          : _metricCard("平均修复时长 MTTR", "待真实数据", 0, (ev.mttr_note || "需故障发生→恢复时间戳"), true));
+
+    // ---- 诚实口径徽章 + 上下文 ----
+    const vm = ev.verify_mode || {};
+    const smoke = ev.agent_smoke_ok != null
+      ? (ev.agent_smoke_ok ? `<span class="verify-badge ok">Agent 冒烟 ✅</span>` : `<span class="verify-badge bad">Agent 冒烟 ❌</span>`)
+      : "";
+    const faults = (ev.samples && ev.samples.fault_types) ? ev.samples.fault_types.join(" / ") : "—";
+    live.innerHTML =
+      `<div class="metrics-live-row">实时：活跃告警流 <b>${d.live.active_streams}</b> · 适配器 <b>${d.live.adapters}</b> · 工具 <b>${d.live.tools}</b></div>`
+      + `<div class="verify-row">`
+      + `<span class="verify-badge">诊断口径：${escapeHtml(vm.diagnosis || "—")}</span>`
+      + `<span class="verify-badge">修复口径：${escapeHtml(vm.remediation || "—")}</span>`
+      + smoke
+      + `</div>`
+      + `<div class="metrics-note">predictor=<b>${escapeHtml(ev.predictor || "—")}</b> ｜ 故障类型：<b>${escapeHtml(faults)}</b> ｜ 生成于 ${escapeHtml(ev.generated_at || "—")}</div>`;
+
+    // ---- 评估明细（合并 rootcause_details + noise_details；旧 ev.details 已废弃）----
+    const rc = ev.rootcause_details || [];
+    const ns = ev.noise_details || [];
+    if (rc.length || ns.length) {
+      const rows = rc.map((x) => `<tr>
+        <td>${escapeHtml(x.id)}</td>
+        <td>可处置</td>
+        <td>${escapeHtml(x.true_root || "—")}</td>
+        <td>${escapeHtml(x.predicted_confidence || "—")}</td>
+        <td>${x.top1_confidence ? "✅" : "❌"}</td>
+        <td>${x.top1_position ? "✅" : "❌"}</td>
+        <td>—</td>
+      </tr>`).join("")
+      + ns.map((x) => `<tr class="row-noise">
+        <td>${escapeHtml(x.id)}</td>
+        <td>噪声</td>
+        <td>—</td><td>—</td><td>—</td><td>—</td>
+        <td>${x.suppressed ? "已抑制✅" : "未抑制❌"}</td>
+      </tr>`).join("");
+      detail.innerHTML = `<h3>评估明细（根因 ${rc.length} · 噪声 ${ns.length}）</h3>`
+        + `<table class="audit-table"><thead><tr>`
+        + `<th>ID</th><th>类型</th><th>真实根因</th><th>预测(置信度口径)</th>`
+        + `<th>Top-1(置信)</th><th>Top-1(位置)</th><th>降噪</th></tr></thead>`
+        + `<tbody>${rows}</tbody></table>`;
     } else {
       detail.innerHTML = `<div class="empty">尚无评估数据，点上方「运行闭环评估」生成。</div>`;
     }

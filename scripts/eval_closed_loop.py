@@ -127,6 +127,10 @@ def run_eval(predictor: str = "stub", error_rate: float = 0.0) -> Dict:
         "avg_decision_latency_s": round(sum(latencies) / max(1, len(latencies)), 1),
         "healthy_thresholds": HEALTHY_THRESHOLDS,
         "remediation_details": remediation_details,
+        # MTTR（平均修复时长）：需真实工单闭环（故障发生→恢复时间戳），当前无该数据源，
+        # 显式留空（null），前端展示「待真实工单数据」占位，绝不编造数字。
+        "mttr_minutes": None,
+        "mttr_note": "待真实工单闭环数据（需故障发生→恢复时间戳，当前无该数据源）",
     }
     return metrics
 

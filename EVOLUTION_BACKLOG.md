@@ -40,8 +40,13 @@
      `test_fiveg_oss_sample_csv_end_to_end` 锁死该行为。
      **剩余动作**：用户给真实导出文件（CSV）→ 在 `alert-5g` 填 `dataset_path` + `column_aliases` 即切源；
      若导出为 Excel 再补 loader 的 xlsx 支持。
-2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）
-   - 依赖真实数据先有；前端大屏加统计卡片（对齐 TelcoNet 的可量化说服力）。
+2. **量化指标看板**（MTTR / 根因 Top-1 准确率 / 噪声抑制率）— **✅ 看板已完善（v0.8.39）**
+   - 前端 `web/app.js` `renderMetrics` 重写：真·根因 **Top-1 双口径**（置信度 / 位置）卡片 +
+     噪声抑制率（带样本量上下文）+ 修复成功率(仿真) + 仿真决策时延；**MTTR 因缺真实工单数据显式占位（不编造）**。
+   - 诚实口径徽章（`verify_mode` 诊断/修复分离标注）+ Agent 冒烟状态 + 故障类型/predictor/生成时间上下文。
+   - 修隐藏 bug：旧明细表读 `ev.details`（已废弃字段）永远空白 → 改用 `rootcause_details` + `noise_details` 真实渲染。
+   - 后端 `eval_closed_loop.py` 产出加 `mttr_minutes: null` + `mttr_note` 显式标记缺口。
+   - 剩余：MTTR 真正数值需带时间戳的工单闭环数据（真实 OSS/网管导出补齐后填）。
 3. **MCP 接真实运维系统**（Grafana / Prometheus / Loki）
    - 架构已预留 `real_adapters.py`，落地较快；让 Agent 拉真实指标做诊断
 4. **SQLite → Postgres**（连接串切换 + 迁移脚本）

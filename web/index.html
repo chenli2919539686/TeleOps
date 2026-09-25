@@ -268,7 +268,7 @@
       <section class="view" id="view-metrics">
         <header class="view-head">
           <h1>📊 指标看板 · 闭环量化</h1>
-          <p><b>诊断段</b>用已知真实根因的标注故障离线验证；<b>修复段</b>把推荐动作作用到仿真靶机验证（<code>remediation=simulated</code>，非生产验证，诚实标注）。点「运行闭环评估」会在服务端重跑 <code>scripts/eval_closed_loop.py</code> 并刷新指标。</p>
+          <p><b>诊断段</b>用已知真实根因的标注故障离线验证；<b>修复段</b>把推荐动作作用到仿真靶机验证（<code>remediation=simulated</code>，非生产验证，诚实标注）。页面顶部卡片显示真·根因 Top-1（置信度 / 位置双口径）、噪声抑制率、修复成功率（仿真）与仿真决策时延；<b>MTTR（平均修复时长）需真实工单闭环数据，当前无该数据源，看板中显式占位、绝不编造</b>。点「运行闭环评估」会重跑 <code>scripts/eval_closed_loop.py</code> 并刷新指标。</p>
         </header>
         <div class="metrics-actions">
           <button class="primary-btn" id="metricsRun">▶ 运行闭环评估</button>
@@ -579,6 +579,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.38"></script>
+  <script src="app.js?v=0.8.39"></script>
 </body>
 </html>
