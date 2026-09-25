@@ -50,6 +50,7 @@ os.environ["TELEOPS_KB_DIR"] = str(_TMP_KB)
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.server import app             # noqa: E402
 from src.core import rate_limit as _rl     # noqa: E402
+from src.core import circuit_breaker as _cb  # noqa: E402
 from src.core.tool_registry import ToolRegistry  # noqa: E402
 from src.core import db                    # noqa: E402
 
@@ -87,6 +88,19 @@ def _rate_limit_reset():
     _rl.configure_rate_limit(enabled=False, read=1000, write=1000, login=1000)
     yield
     _rl.configure_rate_limit(enabled=False, read=1000, write=1000, login=1000)
+
+
+@pytest.fixture(autouse=True)
+def _llm_breaker_reset():
+    """每个测试前把 LLM 熔断器（全局单例）复位为闭合。
+
+    熔断是进程级单例：若某用例让端点连续失败达到阈值，熔断会打开并让后续用例
+    全部走 fail-fast 的 Mock 分支，表现为「跨用例随机降级」的诡异 flake。
+    这里按用例复位，与 _rate_limit_reset 同一手法。
+    """
+    _cb.configure_breaker(threshold=5, reset_seconds=60, enabled=True)
+    yield
+    _cb.configure_breaker(threshold=5, reset_seconds=60, enabled=True)
 
 
 @pytest.fixture(scope="session")

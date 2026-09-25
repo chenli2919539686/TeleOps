@@ -17,6 +17,7 @@ REPLICA_ID = os.environ.get("TELEOPS_REPLICA_ID") or f"{socket.gethostname()}:{o
 
 from src.config import DATA_DIR, load_llm_config
 from src.core import db, metrics
+from src.core import circuit_breaker as cb
 from src.core import rate_limit as rl
 from src.api.context import ctx as s
 
@@ -61,8 +62,20 @@ def _register_metrics_gauges():
     metrics.gauge("teleops_requirements_total", "需求数（按域/状态）", req_items)
     # 多副本可观测：每个副本上报一条以 replica_id 为 label、值为1的序列，
     # 抓取端即可通过 label 数判断当前在线副本数，并区分指标归属。
+    # 故障域可观测：LLM 端点熔断状态（one-hot，当前所处状态那条序列值为 1）
+    def breaker_items():
+        try:
+            snap = cb.get_llm_breaker().snapshot()
+            return [({"state": snap["state"]}, 1)]
+        except Exception:
+            return [({"state": "unknown"}, 0)]
+
     metrics.gauge("teleops_replica_info", "在线副本标识（每副本一条值为1的序列）",
                  lambda: [({"replica_id": REPLICA_ID}, 1)])
+    metrics.gauge("teleops_llm_breaker_state", "LLM 端点熔断状态（label=state，当前状态=1）",
+                 breaker_items)
+    metrics.set_help("teleops_llm_breaker_state",
+                    "LLM 端点熔断状态（closed/open/half_open）")
     metrics.set_help("teleops_workspaces_total", "业务域总数")
     metrics.set_help("teleops_agents_total", "Agent 数（按域/状态）")
     metrics.set_help("teleops_requirements_total", "需求数（按域/状态）")
@@ -119,6 +132,8 @@ def health():
         "uptime_s": int(time.time() - s._START_TS),
         "jobs_running": jobs_running,
         "rate_limit": "on" if rl.ENABLED else "off",
+        # 故障域：LLM 端点熔断快照（tripped=True 表示当前已降级为 fail-fast）
+        "llm_breaker": cb.get_llm_breaker().snapshot(),
     }
 
 

@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 _PROCESSOR_FACTORY: Optional[Callable[[str], Callable[[dict], dict]]] = None
 

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from src.config import load_llm_config
 from src.core import usage
+from src.core import circuit_breaker as cb
 from src.triage_rules import rule_triage, alert_from_prompt
 
 
@@ -155,6 +156,15 @@ class LLMClient:
 
         if self.mode == "mock" or self._client is None:
             return self._mock(prompt)
+        # ---- 故障域：LLM 端点级熔断（fail-fast）----
+        # 端点连续失败被判定不可用后，窗口期内不再打端点，直接降级 Mock。
+        # 否则每条告警都要等一次超时（LLM_TIMEOUT 默认 30s），告警流水线看起来
+        # 像"卡死"，/stream/stop 也要等 join 超时才返回。
+        breaker = cb.get_llm_breaker()
+        if not breaker.allow():
+            print("  [LLMClient] 熔断器已打开，跳过真实调用直接降级 Mock（fail-fast）")
+            self.mode = "mock"
+            return self._mock(prompt)
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -170,9 +180,11 @@ class LLMClient:
                 temperature=temperature,
             )
             self._record_usage(resp, model, prompt)
+            breaker.record_success()  # 成功（含半开探测成功）→ 复位熔断
             return resp.choices[0].message.content or ""
         except Exception as e:
-            # 真实调用失败（限流/网络）时回退 Mock，保证演示不崩
+            # 真实调用失败（限流/网络/超时）时计入连续失败并回退 Mock，保证演示不崩
+            breaker.record_failure()
             print(f"  [LLMClient] 真实调用失败，已回退 Mock：{e}")
             self.mode = "mock"
             return self._mock(prompt)

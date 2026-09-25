@@ -12,12 +12,14 @@ from src.core import db, auth
 
 def _insert_audit(ts, actor, actor_id, action, workspace_id,
                  detail="{}", result="ok", ip="1.2.3.4"):
-    conn = db.get_conn()
-    conn.execute(
+    # 必须走 db.execute（持 db._LOCK 并提交），不能直连共享连接在锁外 commit：
+    # 异步审计写后台线程（src/core/audit_queue.py）会并发操作同一连接并提交，
+    # 可能把本测试刚 INSERT 的事务先提交掉，随后测试自己的 conn.commit() 就会
+    # 抛 "cannot commit - no transaction is active"（共享 session-DB 执行 flake）。
+    db.execute(
         "INSERT INTO audit_log (ts, actor, actor_id, action, workspace_id, "
         "detail, result, ip) VALUES (?,?,?,?,?,?,?,?)",
         (ts, actor, actor_id, action, workspace_id, detail, result, ip))
-    conn.commit()
 
 
 def _make_user(client, prefix):

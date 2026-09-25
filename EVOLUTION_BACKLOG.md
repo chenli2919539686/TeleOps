@@ -109,5 +109,21 @@
   实为演示运行期 dev Agent 重写基线 `tools/pull_metrics.py`/`pull_logs.py` 旧契约所致，`git checkout --` 还原后
   19 例全绿（**非预存，是运行副作用**）。当前唯一已知 flake 是上面两条导出测试的共享-DB 争用，
   修复方向=改独立 DB fixture（待办，不属产品缺陷）。
-- **真实 GitHub Actions CI 仍缺失**：`.github/` 未建，质量门靠本地 + 手动全量跑；`docs/13` §6.3 已列目标门禁
-  （lint/type/test/密钥扫描/构建），落地后接 service 容器跑 Redis/PG 分支。
+- **GitHub Actions CI 已接线（v0.8.49 收尾）**：`.github/workflows/ci.yml`——推送/PR 到 main 触发（ubuntu-latest），
+  五道守卫：敏感文件（`.env` 不得入库，排除 `*.example/sample/template`）/ `ruff check .` /
+  `compileall` / `node --check web/app.js` / 全量 `pytest tests/ -q`。新增 `.ruff.toml`：只开
+  E9/F63/F7/F82 关键规则（先守致命错误、再逐步收紧，避免首次跑红被迫挂 continue-on-error 使门禁失效）——
+  上线即抓出 `src/workers/stream_tasks.py` 用了 `Any` 却未导入（F821，被 `from __future__ import annotations`
+  掩盖才没在运行时炸）。**已知覆盖缺口**：Redis/PG 集成用例在 CI 仍 skip（按 Windows 路径找
+  `tools/redis/redis-server.exe`），需改环境变量注入二进制路径才能真跑（待办）。
+- **共享-DB flake 已修（不再有豁免项）**：`tests/test_audit_export.py` 的 `_insert_audit` 原直连共享 DB 连接、
+  在 `db._LOCK` 之外 `commit()`，与异步审计写后台线程争用同一连接 → 报 `cannot commit - no transaction is active`。
+  改为走线程安全的 `db.execute()`（持锁并提交）后全量稳定全绿；`test_oss_export` import 复用同一函数，一并修复。
+  **教训**：所谓"偶发 flake"往往有确定根因（并发/锁边界），先查根因别急着归类。
+- **LLM 端点级熔断已落地（故障域，ADR-011）**：新增 `src/core/circuit_breaker.py`（closed/open/half_open，
+  `TELEOPS_LLM_CB_THRESHOLD` 默认 5 / `_RESET` 默认 60s / `_ENABLED` 默认开，禁用时完全惰性）；
+  `src/llm_client.py` complete() 接入——熔断打开即 fail-fast 降级 Mock，不再打已死端点（否则每条告警
+  等 30s 超时，流水线"假死"、`/stream/stop` 也要等 join 超时）；`/health` 加 `llm_breaker` 快照，
+  `/metrics` 加 `teleops_llm_breaker_state` gauge。新增 `tests/test_circuit_breaker.py` 10 例（含
+  "熔断打开后真实调用次数停止增长"的实效验证）；`tests/conftest.py` 加 `_llm_breaker_reset` autouse fixture，
+  防全局熔断单例跨用例污染导致"随机降级"型 flake。
