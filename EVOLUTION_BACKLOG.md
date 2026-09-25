@@ -71,10 +71,11 @@
   （`TELEOPS_STATE_STORE=redis` 即落 Redis，详见 `docs/06` §8.4）。单机部署默认仍是本地 JSON，零依赖。
 - **可回放审计时间线已在 v0.8.45 落地**：`GET /audit/timeline`（正序 + 密度分桶 minute/hour/day + 摘要统计），
   前端审计大屏升级为可回放时间线（密度轴 + 变速播放 + 暂停/继续 + 点击柱缩放），隔离规则与 `/audit` 一致。
+- **SSO / OIDC 单点登录已在 v0.8.46 落地**：配置驱动 + mock 兜底，零外部依赖可演示（dev mock 无 IdP 可跑通，
+  配 `TELEOPS_OIDC_ISSUER` 走真实 Authorization Code 流）。详见 `docs/04` 第 P2.5 条与 `src/core/oidc.py`。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
 
 ## 下一步候选（等用户拍板）
 - 剩余非阻塞增强：
-  - **SSO / OIDC 登录**（对标 TelcoNet）：当前 JWT + 邀请码，可补 OIDC 对接企业 IdP（需真实 IdP 才能端到端验证）；
   - **审计日志导出 CSV**（可回放时间线已做，导出为可选补充）。
 - 价值最高的外部数据阻塞项仍是：**真实 OSS/网管导出源**（卡用户给文件，零代码切源）+ **MTTR 真·数值**（卡真实工单闭环数据）。

@@ -39,7 +39,7 @@ if str(ROOT) not in sys.path:
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
@@ -57,6 +57,7 @@ from src.core import auth
 from src.core import metrics
 from src.core import approvals
 from src.core import settings
+from src.core import oidc
 from src.core import rate_limit as rl
 from src.core import usage
 from src.core.alert_stream import AlertStream, build_playlist
@@ -75,7 +76,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.45"
+VERSION = "0.8.46"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -113,7 +114,8 @@ app.add_middleware(
 API_TOKEN = os.environ.get("TELEOPS_API_TOKEN", "").strip()
 AUTH_REQUIRED = bool(API_TOKEN)
 _PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc",
-                 "/auth/status", "/auth/register", "/auth/login", "/auth/logout"}
+                 "/auth/status", "/auth/register", "/auth/login", "/auth/logout",
+                 "/auth/oidc/callback"}
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
@@ -585,7 +587,8 @@ def auth_status():
     """前端据此判断是否需要弹出登录提示（公开端点，不受鉴权中间件限制）。"""
     return {"auth_required": AUTH_REQUIRED, "jwt_enabled": True,
             "users_exist": auth.user_count() > 0,
-            "invite_required": bool(INVITE_CODE)}  # 注册邀请码开关
+            "invite_required": bool(INVITE_CODE),
+            **oidc.oidc_config_summary()}  # OIDC/SSO 启用态与模式（dev/live/off）
 
 
 @app.post("/auth/register")
@@ -1138,66 +1141,65 @@ def metrics_summary(request: Request):
             "env_note": "diagnosis=offline-labeled, remediation=simulated"}
 
 
-# ---------------- OIDC 单点登录（P2⑤，含 dev mock） ----------------
-OIDC_ISSUER = os.environ.get("TELEOPS_OIDC_ISSUER", "").strip()
-OIDC_DEV = os.environ.get("TELEOPS_OIDC_DEV", "").strip() in ("1", "true", "True") or not OIDC_ISSUER
-
-
-def _decode_id_token_unverified(id_token: str) -> Dict[str, Any]:
-    """仅用于本地 dev mock：不校验签名，直接解 payload（生产须走 JWKS 验签）。"""
-    try:
-        part = id_token.split(".")[1]
-        part += "=" * (-len(part) % 4)
-        import base64
-        return json.loads(base64.urlsafe_b64decode(part))
-    except Exception:
-        return {}
-
-
+# ---------------- OIDC 单点登录（配置驱动 + dev mock，零外部依赖可演示） ----------------
 @app.get("/auth/oidc/login")
 def oidc_login():
-    """发起 OIDC 登录：返回跳转 URL。
+    """发起 OIDC 登录：返回跳转地址。
 
-    dev mock（无真实 IdP）：跳回 /auth/oidc/callback?dev_user=... 直接演示。
-    真实 IdP（配了 TELEOPS_OIDC_ISSUER）：返回标准 authorize 重定向地址。
+    dev mock（无真实 IdP / TELEOPS_OIDC_DEV=1）：返回本地回调，带虚拟员工身份，前端直接 fetch 拿 token。
+    真实 IdP（配了 TELEOPS_OIDC_ISSUER）：返回标准 authorize 重定向地址（浏览器整页跳转）。
     """
-    if OIDC_DEV:
-        return {"redirect_url": "/auth/oidc/callback?dev_user=demo@oidc.local&name=OIDCDemo",
-                "mode": "dev"}
-    return {"redirect_url": (f"{OIDC_ISSUER}/authorize?response_type=code"
-                             f"&client_id={os.environ.get('TELEOPS_OIDC_CLIENT_ID','')}"
-                             f"&redirect_uri={os.environ.get('TELEOPS_OIDC_REDIRECT','')}"
-                             f"&scope=openid%20email%20profile"),
-            "mode": "live"}
+    return {"redirect_url": oidc.authorize_url(), "mode": oidc.oidc_mode()}
 
 
-@app.post("/auth/oidc/callback")
-def oidc_callback(dev_user: Optional[str] = None, name: Optional[str] = None,
-                  code: Optional[str] = None, id_token: Optional[str] = None):
+@app.api_route("/auth/oidc/callback", methods=["GET", "POST"])
+def oidc_callback(dev_user: Optional[str] = None, dev_name: Optional[str] = None,
+                  code: Optional[str] = None, request: Request = None):
     """OIDC 回调：校验身份后签发 TeleOps JWT。
 
-    dev_user 模式（demo）：按邮箱 upsert 用户并直接签发。
-    id_token 模式：解 payload 取 sub/email（生产应 JWKS 验签），upsert 并签发。
+    - dev_user 模式（dev mock）：按 email 取虚拟员工身份，upsert 并签发；
+    - code 模式（真实 IdP）：code→token→userinfo 解析身份，upsert 并签发；
+      live 且为浏览器 GET 回调时，重定向回前端并带 token（前端启动读取 ?token= 登录）。
     """
-    sub_email = None
-    display = name or "OIDCUser"
-    if dev_user:
-        sub_email = dev_user
-        display = name or dev_user.split("@")[0]
-    elif id_token:
-        claims = _decode_id_token_unverified(id_token)
-        sub_email = claims.get("email") or claims.get("sub")
-        display = claims.get("name") or (sub_email or "oidc").split("@")[0]
-    if not sub_email:
-        raise HTTPException(status_code=400, detail="未获取到 OIDC 身份")
-    u = auth.get_user(sub_email)
+    identity = None
+    mode = oidc.oidc_mode()
+    if oidc.oidc_dev_mock() and dev_user:
+        identity = oidc.resolve_dev_identity(dev_user)
+        if dev_name and identity:
+            identity = dict(identity, name=dev_name)
+    elif code and not oidc.oidc_dev_mock():
+        try:
+            identity = oidc.resolve_live_identity(code)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"OIDC 令牌交换失败：{e}")
+
+    if not identity:
+        raise HTTPException(status_code=400, detail="未获取到 OIDC 身份（缺 dev_user 或 code）")
+
+    u, created = oidc.upsert_oidc_user(identity)
     if not u:
-        u = auth.create_user(sub_email, os.urandom(12).hex())
-    token = auth.issue_token(u["username"])
+        raise HTTPException(status_code=400, detail="无法创建 OIDC 用户")
+    # 新用户建个人业务域（与注册流程一致，保证多租户隔离）
+    if created:
+        try:
+            ws_store.create_personal(u["id"], u["username"], org_id=u.get("org_id"))
+        except Exception as e:
+            metrics.inc("teleops_oidc_personal_ws_failed")
+            print(f"[warn] 为 OIDC 用户 {u['username']} 建个人域失败: {e}")
     db.audit(u["username"], "auth.oidc", result="ok", actor_id=u["id"],
-             ip="oidc")
-    return {"token": token, "user": {"username": u["username"], "is_admin": u["is_admin"]},
-            "mode": "dev" if OIDC_DEV else "live"}
+             detail={"mode": mode, "sub": identity.get("sub")}, ip="oidc")
+    token = auth.issue_token(u["username"])
+
+    # live 浏览器整页回调：重定向回前端并附带 token（前端启动读取 ?token= 完成登录）
+    if mode == "live" and request is not None and request.method == "GET":
+        fe = os.environ.get("TELEOPS_OIDC_FRONTEND_URL", "http://localhost:8001").strip().rstrip("/")
+        sep = "?" if "?" not in fe else "&"
+        return RedirectResponse(f"{fe}{sep}token={token}")
+
+    return {"token": token, "user": {
+        "username": u["username"], "uid": u["id"], "is_admin": u["is_admin"],
+        "org_id": u.get("org_id"), "roles": u.get("roles"), "perms": u.get("perms")},
+        "mode": mode}
 
 
 # ---------------- Grafana / Prometheus 指标查询（P1④，MCP 风格） ----------------

@@ -6,6 +6,8 @@ const API = DEV_FRONTEND ? "http://localhost:8000" : "";
 let TOKEN = (localStorage.getItem("teleops_token") || "").trim();   // 共享 API Token（服务端设置 TELEOPS_API_TOKEN 时用）
 let JWT = (localStorage.getItem("teleops_jwt") || "").trim();       // 每用户 JWT（登录获取，优先使用）
 let USER = null;                                                    // 当前登录用户 {username, is_admin}
+let OIDC_ENABLED = false;                                           // 服务端是否启用 OIDC/SSO（/auth/status 下发）
+let OIDC_MODE = "off";                                              // off | dev(无 IdP mock) | live(真实 IdP)
 function setToken(t) { TOKEN = (t || "").trim(); }
 function setJwt(t, user) {
   JWT = (t || "").trim();
@@ -937,14 +939,19 @@ async function auditReplay() {
 // ================= OIDC 单点登录（dev mock / 真实 IdP） =================
 async function oidcLoginFlow() {
   try {
-    const d = await apiFetch("/auth/oidc/login").then(r => r.json());
-    if (d.mode === "dev") {
-      // dev mock：直接走回调拿 token
-      const cb = await apiFetch(d.redirect_url.replace("/auth/oidc/callback", "/auth/oidc/callback?dev_user=demo@oidc.local")).then(r => r.json());
-      if (cb.token) { setJwt(cb.token, cb.user); checkAuth(); }
+    const login = await apiFetch("/auth/oidc/login").then(r => r.json());
+    if (login.mode === "dev") {
+      // dev mock：直接 fetch 本地回调拿 token（无真实 IdP）
+      const cb = await apiFetch(login.redirect_url).then(r => r.json());
+      if (cb.token) {
+        setJwt(cb.token, cb.user);
+        await reloadForIdentityChange();   // 切换账号后重选默认域，避免落入公共域
+      } else {
+        alert("OIDC 登录失败：" + (cb.detail || "未知错误"));
+      }
     } else {
-      // 真实 IdP：浏览器跳转授权
-      window.location.href = d.redirect_url;
+      // 真实 IdP：浏览器整页跳转授权，回跳后由 bootstrap 读 ?token= 完成登录
+      window.location.href = login.redirect_url;
     }
   } catch (e) { alert("OIDC 登录失败：" + e.message); }
 }
@@ -1212,6 +1219,15 @@ function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp
 function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 checkHealth();
+// SSO 回传 token（live 模式：IdP 授权后重定向回前端 ?token=...）→ 直接登录并清掉 URL 里的 token
+(function () {
+  const params = new URLSearchParams(location.search);
+  const t = params.get("token");
+  if (t) {
+    setJwt(t, null);   // 先持 token，checkAuth→refreshMe 会用它拉取 USER
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+})();
 setInterval(checkAuth, 30000);
 setInterval(checkHealth, 15000);
 // 启动顺序：先同步登录身份（USER），再拉业务域列表并选中默认域。
@@ -2241,6 +2257,9 @@ async function checkAuth() {
     else banner.style.display = "none";
     // 同步服务端注册邀请码开关
     INVITE_REQUIRED = !!d.invite_required;
+    // 同步 OIDC/SSO 启用态与模式（决定是否显示「SSO」按钮及标注 dev/live）
+    OIDC_ENABLED = !!d.oidc_enabled;
+    OIDC_MODE = d.oidc_mode || "off";
     syncLoginTabs();   // 邀请码开关状态可能变化，刷新 tab UI 显隐
     // 服务端支持 JWT 且本地有凭据 → 同步校验并恢复会话（C：启动即 await，
     // 避免「看着像游客实际是 admin」的渲染窗口期；401 时 refreshMe 会清 JWT）
@@ -2264,10 +2283,14 @@ function renderAuthArea() {
       + `<button class="ghost-btn sm" id="logoutBtn">登出</button>`;
     box.querySelector("#logoutBtn").onclick = logout;
   } else {
+    const ssoLabel = OIDC_MODE === "dev" ? "🔑 SSO·dev" : "🔑 SSO";
+    const ssoTitle = OIDC_MODE === "dev"
+      ? "企业单点登录（dev mock 模式，无需真实 IdP 即可演示）" : "企业单点登录";
     box.innerHTML = `<button class="ghost-btn" id="loginBtn">🔐 登录</button>`
-      + `<button class="ghost-btn sm" id="oidcBtn">🔑 SSO</button>`;
+      + (OIDC_ENABLED
+         ? `<button class="ghost-btn sm" id="oidcBtn" title="${ssoTitle}">${ssoLabel}</button>` : "");
     box.querySelector("#loginBtn").onclick = () => openLogin("");
-    box.querySelector("#oidcBtn").onclick = oidcLoginFlow;
+    if (OIDC_ENABLED) box.querySelector("#oidcBtn").onclick = oidcLoginFlow;
   }
 }
 
