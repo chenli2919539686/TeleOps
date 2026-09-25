@@ -2,9 +2,13 @@
 # 安装：pip install -r requirements-dev.txt
 -r requirements.txt
 pytest>=8.0
-# D3：tests/test_state_store.py 用 fakeredis + Lua 真实执行 Redis 后端，
-# 校验其与本地实现语义对齐；未安装时这些用例会自动跳过。
-fakeredis>=2.0
+# D3：tests/test_state_store.py / test_semaphore.py 用 fakeredis 真实执行 Lua 脚本
+# （限流滑动窗口与分布式信号量都是 Lua 原子实现），校验其与本地实现语义对齐。
+#
+# ⚠️ 必须带 [lua] extra：fakeredis 默认**不含 Lua 后端**，缺 lupa 时 Lua 脚本不生效。
+# CI 首次跑红正是此因——本机装过 lupa 所以全绿，全新环境却挂了 6 个用例
+# （state_store 4 个 + semaphore 2 个，表现为该拦截的被放行）。典型的依赖漂移。
+fakeredis[lua]>=2.0
 # 仅在选用 Redis 后端时才需要客户端包（src/core/state_store.py 内延迟导入，非硬依赖）：
 # 设 TELEOPS_STATE_STORE=redis 前需 pip install redis
 redis>=5.0
