@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 # 同一分支的多次推送只保留最新一次运行，避免排队浪费
 concurrency:
@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   quality:
-    name: 质量门（敏感文件 / lint / 编译 / 前端 / 测试）
+    name: 质量门 (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
 
     steps:
       - name: 检出代码
@@ -23,7 +27,7 @@ jobs:
       - name: 准备 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
       - name: 准备 Node（前端语法门）
@@ -63,7 +67,20 @@ jobs:
         run: node --check web/app.js
 
       # ---- 守卫 5：全量测试门（核心）----
+      # 失败时把 FAILED/ERROR 行以 ::error:: 抛出 → 变成 GitHub 注解，
+      # 无需下载日志也能在 PR 页面直接看到失败用例名（排障友好）。
       # 说明：依赖真实 Redis 二进制 / Postgres DSN 的少数集成用例在无对应环境时
       # 会自动 skip（见 docs/13 §6.1），不阻断门禁。
       - name: 测试门（全量 pytest）
-        run: python -m pytest tests/ -q
+        run: |
+          # 注意：GitHub 的 run 默认走 `bash -e`，若用 pipefail 会在失败管道处直接退出、
+          # 后面的注解代码根本不执行。这里用 `|| true` 兜住 -e，再用 PIPESTATUS[0]
+          # 取回 pytest 自己的退出码。
+          python -m pytest tests/ -q --tb=line 2>&1 | tee pytest.log || true
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E '^(FAILED|ERROR)' pytest.log | head -10 | while read -r line; do
+              echo "::error title=测试失败::$line"
+            done
+          fi
+          exit $code
