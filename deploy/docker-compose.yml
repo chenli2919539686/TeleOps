@@ -38,6 +38,29 @@ services:
       - teleops_data:/app/data
       - teleops_kb:/app/kb
       - teleops_tools:/app/tools
+    # 切 Postgres（Phase 2）：取消下面 3 行注释，并把上面的 teleops_data 卷去掉或保留做备份
+    # 另需在 .env 设 TELEOPS_DB_DSN=postgresql://teleops:teleops@postgres:5432/teleops
+    # environment 追加：TELEOPS_DB_DSN: ${TELEOPS_DB_DSN:-}
+    # depends_on:
+    #   - postgres
+
+  # ---- 可选：Postgres（多 worker / 多副本前置，详见 docs/04 / EVOLUTION_BACKLOG） ----
+  # 默认不启动；需要时：docker compose --profile pg up -d
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["pg"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-teleops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-teleops}
+      POSTGRES_DB: ${POSTGRES_DB:-teleops}
+    volumes:
+      - teleops_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-teleops} -d ${POSTGRES_DB:-teleops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
       - teleops_traces:/app/traces
 
   caddy:
@@ -101,6 +124,7 @@ volumes:
   teleops_kb:
   teleops_tools:
   teleops_traces:
+  teleops_pg:
   caddy_data:
   caddy_config:
   prometheus_data:

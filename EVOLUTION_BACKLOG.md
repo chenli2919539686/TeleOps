@@ -52,8 +52,11 @@
    - 端点：`POST /adapters/metrics-grafana|metrics-prometheus/query`、`POST /adapters/logs-loki|log-elk/logs`。
    - 测试：`tests/test_adapters_real.py`（Prometheus/Loki demo+live 解析）+ `tests/test_monitoring_endpoints.py`（路由 200/404/400）。详见 `docs/09-接入真实监控系统.md`。
    - 剩余：Agent 诊断阶段把监控查询做成可调用的工具（pull_metrics/pull_logs）属增强项，非阻塞。
-4. **SQLite → Postgres**（连接串切换 + 迁移脚本） 🔶 **进行中**
-   - `docs/04:28` 数据层已预留 DSN 切换点；建议多 worker 前先做（见下 Phase 2）
+4. **SQLite → Postgres**（连接串切换 + 迁移脚本） ✅ **已落地（v0.8.41）**
+   - `src/core/db.py` 方言翻译层：AUTOINCREMENT→IDENTITY、INSERT OR IGNORE→ON CONFLICT DO NOTHING、
+     executescript 拆句按方言执行；`TELEOPS_DB_DSN=postgresql://...` 即切，默认仍 SQLite 零依赖。
+   - 测试：`tests/test_db_postgres.py`（纯翻译单测常跑 + 真连集成测试按 `TELEOPS_TEST_PG_DSN` 启停）。
+   - 部署：`deploy/docker-compose.yml` 加 `postgres` 服务（`--profile pg` 启用）。
 5. **多 worker**（uvicorn `--workers` + Caddy upstream 多目标）
    - **必须先切 Postgres**（SQLite 多进程写有坑，Windows spawn 也坑）；D3 Redis 已打底
 6. **Caddy 多后端**（upstreams 指多副本 + `/health` 探活看 `replica_id`）
