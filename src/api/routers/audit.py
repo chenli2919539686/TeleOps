@@ -17,7 +17,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from src.core import db
+from fastapi import Body
+
+from src.core import db, oss
 from src.api.context import ctx as s
 
 router = APIRouter()
@@ -247,6 +249,33 @@ def _iter_csv(rows):
         yield buf.getvalue()
 
 
+def _build_csv_bytes(rows) -> bytes:
+    """把审计行打包成 UTF-8（含 BOM）CSV 字节——供「直接下载」与「归档 OSS」共用。"""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(CSV_COLUMNS)
+    for r in rows:
+        d = dict(r)
+        w.writerow([_csv_cell(d.get(c)) for c in CSV_COLUMNS])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8-sig")
+
+
+def _collect_rows(user: dict, *, workspace_id=None, actor=None,
+                  action_prefix=None, since=None, until=None):
+    """按隔离 + 过滤取「全部匹配」审计行（导出/归档共用，保证看得到的才能导出）。"""
+    if workspace_id:
+        if not s.ws_store.is_visible_to(workspace_id, user):
+            return None  # 越权/不存在，调用方转 404
+        where, params = "WHERE workspace_id=?", [workspace_id]
+    else:
+        where, params = _base_where(user)
+    where, params = _apply_filters(
+        where, params, actor=actor, action_prefix=action_prefix,
+        since=since, until=until)
+    return db.query(
+        f"SELECT * FROM audit_log {where} ORDER BY id ASC", tuple(params))
+
+
 @router.get("/audit/export")
 def export_audit(request: Request,
                  format: str = "csv",
@@ -272,20 +301,11 @@ def export_audit(request: Request,
     if not user:
         raise HTTPException(status_code=401, detail="需要登录才能导出审计日志")
 
-    if workspace_id:
-        if not s.ws_store.is_visible_to(workspace_id, user):
-            raise HTTPException(status_code=404, detail="业务域不存在")
-        where, params = "WHERE workspace_id=?", [workspace_id]
-    else:
-        where, params = _base_where(user)
-
-    where, params = _apply_filters(
-        where, params, actor=actor, action_prefix=action_prefix,
-        since=since, until=until)
-
-    # 导出不受列表分页限制：取全部匹配（按 id 正序，时间自然序）
-    rows = db.query(
-        f"SELECT * FROM audit_log {where} ORDER BY id ASC", tuple(params))
+    rows = _collect_rows(
+        user, workspace_id=workspace_id, actor=actor,
+        action_prefix=action_prefix, since=since, until=until)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="业务域不存在")
 
     if format == "json":
         return Response(
@@ -298,3 +318,59 @@ def export_audit(request: Request,
     }
     return StreamingResponse(
         _iter_csv(rows), media_type="text/csv; charset=utf-8", headers=headers)
+
+
+@router.post("/audit/archive")
+def archive_audit(request: Request, payload: dict = Body(default={})):
+    """归档审计日志到对象存储（OSS/S3）：配置驱动 + 本地 mock 兜底。
+
+    复用 /audit、/audit/export 同一套隔离与过滤（_base_where + _apply_filters +
+    _collect_rows），保证「看得到的才能归档」，绝不越权泄露他人业务域记录。
+
+    请求体（均可选，缺省按当前登录用户可见范围全量）：
+      { format: "csv"|"json"(默认 csv),
+        workspace_id, actor, action_prefix, since, until,
+        key?: 自定义对象 key（缺省用 oss.default_audit_key） }
+
+    行为（取决于 oss_mode）：
+      - off ：未启用 OSS → 503，提示设置 TELEOPS_OSS_ENABLED=1；
+      - mock：写本地 data/oss_mock/<key>，零依赖可演示（url 为本地路径）；
+      - s3  ：boto3 上传到真实桶，url 为预签名 GET URL（1h 有效）。
+
+    返回 { backend, mode, key, bucket?, local_path?, url, bytes, count }。
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="需要登录才能归档审计日志")
+
+    fmt = str(payload.get("format", "csv")).lower()
+    if fmt not in ("csv", "json"):
+        fmt = "csv"
+    rows = _collect_rows(
+        user,
+        workspace_id=payload.get("workspace_id"),
+        actor=payload.get("actor"),
+        action_prefix=payload.get("action_prefix"),
+        since=payload.get("since"),
+        until=payload.get("until"))
+    if rows is None:
+        raise HTTPException(status_code=404, detail="业务域不存在")
+
+    if fmt == "json":
+        data = json.dumps([dict(r) for r in rows], ensure_ascii=False,
+                          default=str).encode("utf-8")
+        content_type = "application/json"
+        ext = "json"
+    else:
+        data = _build_csv_bytes(rows)
+        content_type = "text/csv; charset=utf-8"
+        ext = "csv"
+
+    key = payload.get("key") or oss.default_audit_key(ext)
+    try:
+        info = oss.archive_bytes(key, data, content_type)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    info["bytes"] = len(data)
+    info["count"] = len(rows)
+    return info

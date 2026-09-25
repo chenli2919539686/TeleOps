@@ -350,6 +350,7 @@
           </label>
           <button class="ghost-btn" id="auditRefresh">🔄 刷新</button>
           <button class="ghost-btn" id="auditExport" title="按当前「业务域 / 起止时间」筛选条件，导出全部匹配记录为 CSV（UTF-8，Excel 可直接打开）">⬇ 导出 CSV</button>
+          <button class="ghost-btn" id="auditArchive" title="按当前筛选条件归档审计日志到对象存储（OSS/S3）：未配置走本地 mock 兜底，零依赖可演示">🗄 归档到 OSS</button>
           <label class="audit-field"><span>起</span><input id="auditSince" type="datetime-local" /></label>
           <label class="audit-field"><span>止</span><input id="auditUntil" type="datetime-local" /></label>
           <button class="ghost-btn" id="auditReplay">▶ 回放</button>
@@ -591,6 +592,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=0.8.47"></script>
+  <script src="app.js?v=0.8.48"></script>
 </body>
 </html>

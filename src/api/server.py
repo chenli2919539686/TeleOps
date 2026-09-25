@@ -60,6 +60,7 @@ from src.core import settings
 from src.core import oidc
 from src.core import rate_limit as rl
 from src.core import usage
+from src.core import oss
 from src.core.alert_stream import AlertStream, build_playlist
 from src.llm_client import LLMClient
 from src.agents.ops_agent import OpsAgent
@@ -76,7 +77,7 @@ from src.adapters.registry import AdapterRegistry
 
 app = FastAPI(title="TeleOps 智能体平台", version="0.8.7")
 
-VERSION = "0.8.47"
+VERSION = "0.8.48"
 _START_TS = time.time()   # 进程启动时刻（/health uptime_s、metrics 已含 uptime）
 
 # 注册邀请码：环境变量 TELEOPS_INVITE_CODE 非空时启用注册校验。
@@ -588,7 +589,14 @@ def auth_status():
     return {"auth_required": AUTH_REQUIRED, "jwt_enabled": True,
             "users_exist": auth.user_count() > 0,
             "invite_required": bool(INVITE_CODE),
-            **oidc.oidc_config_summary()}  # OIDC/SSO 启用态与模式（dev/live/off）
+            **oidc.oidc_config_summary(),  # OIDC/SSO 启用态与模式（dev/live/off）
+            **oss.oss_config_summary()}   # OSS 归档启用态与模式（off/mock/s3）
+
+
+@app.get("/oss/status")
+def oss_status():
+    """对象存储（OSS/S3）归档后端状态（公开，仅暴露非敏感配置）。"""
+    return oss.oss_config_summary()
 
 
 @app.post("/auth/register")

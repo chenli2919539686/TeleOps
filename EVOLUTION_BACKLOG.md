@@ -76,6 +76,10 @@
 - **审计 CSV 导出已在 v0.8.47 落地**：`GET /audit/export`（`format=csv/json`），复用 `/audit` 同一套多租户隔离与
   过滤（`_base_where` + `_apply_filters`），保证「看得到的才能导出」；UTF-8 BOM CSV，按当前筛选导出全部匹配记录，
   零外部依赖。前端审计大屏加「⬇ 导出 CSV」按钮（`fetch+blob` 下载，`apiFetch` 自动带 JWT）。详见 `docs/04` 第 8 条。
+- **审计对象存储（OSS）归档已在 v0.8.48 落地**：`POST /audit/archive`，配置驱动 + 本地 mock 兜底（零依赖可演示，
+  `TELEOPS_OSS_ENABLED=1` 即写本地 `data/oss_mock/`；配齐 `TELEOPS_OSS_BUCKET/ENDPOINT/ACCESS_KEY/SECRET_KEY` 走
+  boto3 S3 兼容真实桶）。复用 `/audit/export` 同一套隔离与过滤，保证「看得到的才能归档」。详见 `docs/04` 第 9 条与
+  `src/core/oss.py`。术语：此处 OSS = Object Storage，与「真实电信 OSS 数据导入」是两件事。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
 
 ## 下一步候选（等用户拍板）

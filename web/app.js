@@ -781,6 +781,7 @@ $("#auditReplay").onclick = () => auditReplay();
 $("#auditPlay").onclick = () => auditReplayToggle();
 $("#auditSpeed").onchange = () => auditReplaySpeed();
 $("#auditExport").onclick = () => auditExport();
+$("#auditArchive").onclick = () => auditArchive();
 
 // 导出当前筛选条件下的全部审计记录为 CSV（后端 /audit/export 复用同一套多租户隔离）
 async function auditExport() {
@@ -807,6 +808,43 @@ async function auditExport() {
     URL.revokeObjectURL(url);
   } catch (e) {
     alert("审计导出失败：" + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
+// 归档当前筛选条件下的全部审计记录到对象存储（OSS/S3）。
+// 后端 /audit/archive 复用同一套多租户隔离；OSS 未配置时走本地 mock 兜底（零依赖）。
+async function auditArchive() {
+  if (!USER) { alert("请先登录后再归档审计日志"); return; }
+  const wsId = ($("#auditWs") || {}).value || "";
+  const since = ($("#auditSince") || {}).value || "";
+  const until = ($("#auditUntil") || {}).value || "";
+  const body = {
+    format: "csv",
+    workspace_id: wsId || undefined,
+    since: since ? since.replace("T", " ") : undefined,
+    until: until ? until.replace("T", " ") : undefined,
+  };
+  const btn = $("#auditArchive");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "⏳ 归档中…";
+  try {
+    const r = await apiFetch("/audit/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((data.detail || ("HTTP " + r.status)));
+    const loc = data.local_path || data.url || data.key;
+    const msg = `已归档到 OSS（${data.mode}）\n` +
+      `对象 key：${data.key}\n` +
+      `记录数：${data.count}　大小：${data.bytes} 字节\n` +
+      `位置：${loc}`;
+    alert(msg);
+  } catch (e) {
+    alert("审计归档失败：" + e.message);
   } finally {
     btn.disabled = false; btn.textContent = old;
   }
