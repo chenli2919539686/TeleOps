@@ -13,11 +13,12 @@ from src.core import db
 from src.config import TOOLS_DIR, KB_DIR
 
 # 预设工具的执行脚本，必须保留
-PRESET_FILES = {"net_ping.py", "svc_restart.py"}
+PRESET_FILES = {"net_ping.py", "svc_restart.py", "pull_metrics.py", "pull_logs.py"}
 
 
 def clean_db():
-    db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service')")
+    db.execute("DELETE FROM tools WHERE name NOT IN "
+               "('ping_host','restart_service','pull_metrics','pull_logs')")
     db.execute("DELETE FROM requirements")
     print("DB: 已清理生成工具与需求看板")
 

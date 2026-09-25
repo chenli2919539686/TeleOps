@@ -130,7 +130,8 @@ def stream_reset_demo(request: Request):
     # 停所有域的流水线：交给执行器（不再直接摸 _streams 这个进程内字典，
     # 队列模式下流根本不在这个字典里）
     running = s.stream_executor.stop_all()
-    s.db.execute("DELETE FROM tools WHERE name NOT IN ('ping_host','restart_service') "
+    s.db.execute("DELETE FROM tools WHERE name NOT IN "
+               "('ping_host','restart_service','pull_metrics','pull_logs') "
                "AND (workspace_id IS NULL OR workspace_id='')")
     # 一并清空需求看板，让「缺工具→造工具」闭环可从头重演，避免历史 REQ 干扰演示
     s.db.execute("DELETE FROM requirements")

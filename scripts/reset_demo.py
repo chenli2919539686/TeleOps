@@ -16,7 +16,7 @@ TOOLS_JSON = ROOT / "data" / "tools.json"
 REQ_JSON = ROOT / "data" / "requirements.json"
 
 # 基线工具（由 scripts/gen_data.py 生成，非自动生成）
-BASELINE = {"ping_host", "restart_service"}
+BASELINE = {"ping_host", "restart_service", "pull_metrics", "pull_logs"}
 # 历史上研发 Agent 可能自动生成的工具脚本名
 AUTO_PY = ["optical_power_probe", "temperature_probe", "generic_probe"]
 

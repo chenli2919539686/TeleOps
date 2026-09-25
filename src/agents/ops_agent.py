@@ -114,11 +114,19 @@ class OpsAgent:
                 "\n\n当前工具库已有工具（优先复用已有名字，只有确实没有合适工具时才推荐新名字）: "
                 + ", ".join(existing)
             )
+        monitor_hint = (
+            "\n\n诊断增强：当根因假设可由近期指标波动或日志关键字佐证时，可在 recommended_tool "
+            "推荐只读诊断工具，并用 tool_args（JSON 对象）携带查询参数：\n"
+            "  - pull_metrics：拉取监控指标时序，tool_args={query:'<PromQL>',hours:<整数>}，默认 query='up'\n"
+            "  - pull_logs：拉取日志，tool_args={query:'<LogQL 流选择器>',limit:<整数>}，默认 query='{job=~\".+\"}'\n"
+            "这两个工具只读、无需人工确认；不要把它们写成需要写操作的动作。"
+        )
         prompt = (
             "[TASK:ROOTCAUSE]\n"
             f"你是电信云网运维专家。基于以下上下文，对告警做根因推理，"
-            f"输出 JSON：{{hypotheses:[{{cause,confidence,evidence,recommended_tool,recommended_action}}],conclusion}}。\n\n"
-            f"告警: {json.dumps(alert, ensure_ascii=False)}\n上下文:\n{ctx}{tools_hint}"
+            f"输出 JSON：{{hypotheses:[{{cause,confidence,evidence,recommended_tool,"
+            f"recommended_action,tool_args}}],conclusion}}。\n\n"
+            f"告警: {json.dumps(alert, ensure_ascii=False)}\n上下文:\n{ctx}{tools_hint}{monitor_hint}"
         )
         raw = self.llm.complete(prompt)
         data = extract_json(raw)
@@ -130,7 +138,14 @@ class OpsAgent:
         return data
 
     # ---------- 3. 执行根因建议的可用工具 ----------
-    def run_recommended_tools(self, diagnosis: dict) -> list:
+    def run_recommended_tools(self, diagnosis: dict, alert: dict = None) -> list:
+        """执行诊断假设里推荐的可用工具，返回每个工具的执行结果。
+
+        tool_args（hypothesis 里可选的 JSON 对象）会透传给工具，让 LLM 能指定
+        具体查询表达式（如 pull_metrics 的 PromQL、pull_logs 的 LogQL）；
+        同时默认带上告警主机 host，供 ping_host 等工具使用。
+        """
+        host = (alert or {}).get("host", "")
         results = []
         for h in diagnosis.get("hypotheses", []):
             tool_name = h.get("recommended_tool")
@@ -143,8 +158,12 @@ class OpsAgent:
                 results.append({"tool": tool_name, "status": "blocked",
                                 "reason": "高风险工具需人工确认"})
                 continue
+            tool_args = h.get("tool_args") or {}
+            params = {"host": host}
+            if isinstance(tool_args, dict):
+                params.update(tool_args)
             try:
-                out = self.tools.call(tool_name, {"host": ""})
+                out = self.tools.call(tool_name, params)
                 results.append({"tool": tool_name, "status": "ok", "result": out})
             except Exception as e:
                 results.append({"tool": tool_name, "status": "error", "reason": str(e)})
@@ -194,7 +213,7 @@ class OpsAgent:
                     "diagnosis": {}, "tool_results": [], "plan": {"actions": ["噪声告警，已抑制"]}}
         diag = self.rootcause(alert)
         diag = self._normalize_tool_names(diag)
-        tr = self.run_recommended_tools(diag)
+        tr = self.run_recommended_tools(diag, alert)
         missing = self.detect_missing_tool(diag)
         plan = self.build_plan(diag, tr)
         return {"alert": alert, "normalized": norm, "is_noise": False,
@@ -208,7 +227,7 @@ class OpsAgent:
         重新执行诊断建议的探测，验证闭环生效。
         """
         diagnosis = self._normalize_tool_names(diagnosis)
-        tr = self.run_recommended_tools(diagnosis)
+        tr = self.run_recommended_tools(diagnosis, alert)
         missing = self.detect_missing_tool(diagnosis)
         plan = self.build_plan(diagnosis, tr)
         return {"alert": alert, "normalized": {**alert, "is_noise": False, "normalized": True,

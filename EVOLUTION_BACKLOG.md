@@ -51,7 +51,7 @@
    - `GrafanaAdapter`（数据源代理）+ `PrometheusAdapter`（直连 `/api/v1/query_range`）+ `LokiLogAdapter`（LogQL `/loki/api/v1/query_range`）三者齐备，均「配置驱动 + demo 兜底」。
    - 端点：`POST /adapters/metrics-grafana|metrics-prometheus/query`、`POST /adapters/logs-loki|log-elk/logs`。
    - 测试：`tests/test_adapters_real.py`（Prometheus/Loki demo+live 解析）+ `tests/test_monitoring_endpoints.py`（路由 200/404/400）。详见 `docs/09-接入真实监控系统.md`。
-   - 剩余：Agent 诊断阶段把监控查询做成可调用的工具（pull_metrics/pull_logs）属增强项，非阻塞。
+   - **Agent 诊断工具化（v0.8.43 已落地）**：内置只读工具 `pull_metrics` / `pull_logs`（注册进 `ToolRegistry`，随基线播种），`OpsAgent.rootcause` 提示词引导 LLM 在 `recommended_tool` 推荐二者并借 `tool_args` 携带 PromQL/LogQL，`run_recommended_tools` 透传 `tool_args` + 告警 host；未配 `data/adapters.json` 自动回退 demo。详见 `docs/09` 第 3 节。
 4. **SQLite → Postgres**（连接串切换 + 迁移脚本） ✅ **已落地（v0.8.41）**
    - `src/core/db.py` 方言翻译层：AUTOINCREMENT→IDENTITY、INSERT OR IGNORE→ON CONFLICT DO NOTHING、
      executescript 拆句按方言执行；`TELEOPS_DB_DSN=postgresql://...` 即切，默认仍 SQLite 零依赖。

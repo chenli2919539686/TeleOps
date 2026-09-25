@@ -85,6 +85,22 @@ def gen_tools():
             "risk": "high",
             "require_human_approval": True,
         },
+        {
+            "name": "pull_metrics",
+            "description": "拉取监控指标时序(Prometheus/Grafana)，只读诊断，参数 query:PromQL, hours:整数",
+            "params": {"query": {"type": "string"}, "hours": {"type": "integer"}},
+            "executor": "tools/pull_metrics.py",
+            "owner_agent": "ops",
+            "risk": "low",
+        },
+        {
+            "name": "pull_logs",
+            "description": "用 LogQL 拉取日志(Loki/ELK)，只读诊断，参数 query:LogQL, limit:整数",
+            "params": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "executor": "tools/pull_logs.py",
+            "owner_agent": "ops",
+            "risk": "low",
+        },
     ]}
 
 

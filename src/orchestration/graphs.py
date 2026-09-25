@@ -28,7 +28,7 @@ def build_ops_graph(agent):
         if s.get("normalized", {}).get("is_noise"):
             return {"diagnosis": {}, "tool_results": [], "missing_tool": "", "plan": {"actions": ["噪声告警，已抑制"]}}
         diag = agent.rootcause(s["alert"])
-        tr = agent.run_recommended_tools(diag)
+        tr = agent.run_recommended_tools(diag, s["alert"])
         missing = agent.detect_missing_tool(diag)
         plan = agent.build_plan(diag, tr)
         return {"diagnosis": diag, "tool_results": tr, "missing_tool": missing, "plan": plan}

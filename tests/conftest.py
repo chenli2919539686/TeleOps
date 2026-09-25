@@ -66,6 +66,12 @@ def _seed_baseline_tools():
         {"name": "restart_service", "executor": "svc_restart.py",
          "risk": "high", "require_human_approval": True,
          "description": "服务重启（高危，需人工确认）"},
+        {"name": "pull_metrics", "executor": "pull_metrics.py",
+         "risk": "low", "require_human_approval": False,
+         "description": "拉取监控指标时序（Prometheus/Grafana），只读诊断"},
+        {"name": "pull_logs", "executor": "pull_logs.py",
+         "risk": "low", "require_human_approval": False,
+         "description": "用 LogQL 拉取日志（Loki/ELK），只读诊断"},
     ]
     for t in seed:
         if not registry.get(t["name"]):
