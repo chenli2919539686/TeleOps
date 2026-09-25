@@ -109,7 +109,20 @@
   实为演示运行期 dev Agent 重写基线 `tools/pull_metrics.py`/`pull_logs.py` 旧契约所致，`git checkout --` 还原后
   19 例全绿（**非预存，是运行副作用**）。当前唯一已知 flake 是上面两条导出测试的共享-DB 争用，
   修复方向=改独立 DB fixture（待办，不属产品缺陷）。
-- **GitHub Actions CI 已接线（v0.8.49 收尾）**：`.github/workflows/ci.yml`——推送/PR 到 main 触发（ubuntu-latest），
+- **GitHub Actions CI 已修复并转绿（v0.8.50）**：⚠️ 先纠正认知——CI **并非"未接线"**，早在 v0.7.5（`4225bb9`）就建了
+  `.github/workflows/ci.yml`，只是一直是红的（本机全绿掩盖）。此前用 `Glob(".github/**")` 查不到是**点号目录被 glob
+  默认排除**导致的误判，我据此错误地报了"CI 缺失"。本次合并了旧配置的优点（py3.11/3.13 矩阵、workflow_dispatch、
+  master 分支）与新增守卫，并把 4 个真问题修掉 → **py3.11 + py3.13 双矩阵 success**（run 36158192237）。
+  排障关键手法：**job 日志需认证(403)，但 annotations 可公开读** → 让测试门失败时把 `FAILED` 行以 `::error::`
+  抛出即可免凭据拿到精确失败用例名（否则 Windows 本机无法复现 Linux 失败，只能盲猜）。
+  - 问题1 **依赖漂移**：`fakeredis` 缺 `[lua]` extra（本机装过 lupa、全新环境没有）→ Lua 不生效，
+    `test_state_store` 4 例 + `test_semaphore` 2 例红（该拦截的被放行）。改 `fakeredis[lua]>=2.0`。
+  - 问题2 **异步落库竞态**：审计后台线程写，断言类用例立刻查 → 每次红不同用例、两 Python 版本来回漂。
+    加 `TELEOPS_AUDIT_SYNC`（调用时读 env）测试同步、生产异步；`test_audit_queue.py` 自我豁免保留异步语义测。
+  - 问题3 **子串误命中**：`assert 'ws-2' not in body` 被 `ws-20` 误判（隔离逻辑没坏，同逻辑的
+    `test_oss_export` 按列比对一直绿）→ 改 `csv.DictReader` 按列精确比对。
+  - 问题4 ruff F821：`src/workers/stream_tasks.py` 用 `Any` 未导入（被 `from __future__ import annotations` 掩盖）。
+- **CI 配置现状**：`.github/workflows/ci.yml`——推送/PR 到 main 触发（ubuntu-latest），
   五道守卫：敏感文件（`.env` 不得入库，排除 `*.example/sample/template`）/ `ruff check .` /
   `compileall` / `node --check web/app.js` / 全量 `pytest tests/ -q`。新增 `.ruff.toml`：只开
   E9/F63/F7/F82 关键规则（先守致命错误、再逐步收紧，避免首次跑红被迫挂 continue-on-error 使门禁失效）——
