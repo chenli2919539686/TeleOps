@@ -193,6 +193,64 @@ def user_perms(user_id: int) -> List[str]:
     return [r["permission"] for r in rows]
 
 
+# ---------------- 角色运营（管理员分配/回收） ----------------
+def list_builtin_roles() -> List[Dict[str, Any]]:
+    """返回内置角色及其权限矩阵（供管理员界面展示与分配）。"""
+    return [{"role_id": rid, "permissions": perms}
+            for rid, perms in db.BUILTIN_ROLES.items()]
+
+
+def list_users_roles() -> List[Dict[str, Any]]:
+    """返回全部用户及其当前角色（is_admin 用户恒显 super_admin）。"""
+    rows = db.query(
+        "SELECT u.id,u.username,u.is_admin,u.org_id,"
+        "(SELECT GROUP_CONCAT(role_id) FROM user_roles ur WHERE ur.user_id=u.id) AS roles "
+        "FROM users u ORDER BY u.id")
+    out = []
+    for r in rows:
+        roles = [x for x in (r["roles"] or "").split(",") if x] if r["roles"] else []
+        if r["is_admin"] and "super_admin" not in roles:
+            roles = ["super_admin"] + roles
+        out.append({"id": r["id"], "username": r["username"],
+                    "is_admin": bool(r["is_admin"]), "org_id": r.get("org_id"),
+                    "roles": roles})
+    return out
+
+
+def assign_role(username: str, role_id: str) -> bool:
+    """给用户绑定一个内置角色。成功 True，用户/角色不存在 False。"""
+    u = get_user(username)
+    if not u:
+        return False
+    if role_id not in db.BUILTIN_ROLES:
+        return False
+    db.execute("INSERT OR IGNORE INTO user_roles (user_id,role_id) VALUES (?,?)",
+               (u["id"], role_id))
+    return True
+
+
+def revoke_role(username: str, role_id: str) -> bool:
+    """回收用户的一个角色。带两道安全闸防锁死："""
+    u = get_user(username)
+    if not u:
+        return False
+    if role_id == "super_admin":
+        # 超级管理员由 is_admin 字段管理，禁止经角色表直接吊销，避免误锁死。
+        return False
+    db.execute("DELETE FROM user_roles WHERE user_id=? AND role_id=?",
+               (u["id"], role_id))
+    # 安全闸：若吊销后系统内已无任何 super_admin（含 is_admin 用户），立即回滚，
+    # 防止把最后一个管理员也降权导致无人能再分配角色。
+    remaining = db.query_one(
+        "SELECT COUNT(*) AS c FROM users WHERE is_admin=1")
+    if (remaining or {}).get("c", 0) == 0:
+        db.execute("INSERT OR IGNORE INTO user_roles (user_id,role_id) VALUES (?,?)",
+                   (u["id"], role_id))
+        return False
+    return True
+
+
+
 def _user_record(r: dict) -> Dict[str, Any]:
     uid = r["id"]
     return {

@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from src.api.context import ctx as s
+from src.api.deps import assert_perm
 
 StreamStartReq = s.StreamStartReq
 
@@ -32,6 +33,10 @@ def stream_start(req: StreamStartReq, request: Request):
         raise HTTPException(
             status_code=403,
             detail="无权在该业务域启动告警流水线（公共域仅管理员，私有域仅所有者）")
+    # RBAC 能力闸：启动告警流需要 tool.exec（sre / org_admin / super_admin 拥有，
+    # viewer / dev 没有 → 被拦）。与上方租户闸正交：租户闸管"是不是你的域"，
+    # 这里管"你的角色有没有这个操作能力"，共同实现方法论要求的角色分化。
+    assert_perm(request, "tool.exec", action="stream.start", target=req.workspace_id)
     if req.profile not in ("mixed", "story"):
         raise HTTPException(status_code=400, detail="profile 必须为 mixed 或 story")
     if req.mode and req.mode not in ("auto", "manual"):

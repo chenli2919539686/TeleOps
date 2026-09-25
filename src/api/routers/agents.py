@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Request
 
 from src.api.context import ctx as s
+from src.api.deps import assert_perm
 
 ModeReq = s.ModeReq
 RaiseReq = s.RaiseReq
@@ -120,6 +121,9 @@ def build_agent(agent_id: str, feedback: Dict[str, Any], request: Request):
     pending 审批单，由管理员批准后才真正执行（与 stream.start 同一套审批管线）。
     实际执行逻辑在 server._run_agent_build（与审批批准共用）。
     """
+    # RBAC 能力闸：造工具需要 agent.manage（sre / org_admin / dev / super_admin 拥有，
+    # viewer 没有 → 被拦）。无论是否走 HITL 审批，这个能力门槛都先过。
+    assert_perm(request, "agent.manage", action="tool.build", target=agent_id)
     if s.get_require_approval():
         actor, _ = s._actor_of(request)
         apr_id = s.approvals.create(
@@ -135,12 +139,15 @@ def build_agent(agent_id: str, feedback: Dict[str, Any], request: Request):
 
 
 @router.post("/agents/{agent_id}/register-gap")
-def agent_register_gap(agent_id: str, req: GapRegisterReq):
+def agent_register_gap(agent_id: str, req: GapRegisterReq, request: Request):
     """工作台诊断出工具缺口后，把缺口登记进当前业务域消息栏并按模式派发（打通工作台→闭环）。
 
     前端在 /agents/{id}/diagnose 跑出 missing_tool 后，带诊断结果回传本接口，
     避免重复推理；登记的需求归属该 Agent 所在业务域，自动模式即跑完研发→回传闭环。
     """
+    # RBAC 能力闸：登记工具缺口（派发研发造工具）需要 agent.manage，
+    # 与 build_agent 同一门槛，保证"能造工具的人才能发起缺口派发"。
+    assert_perm(request, "agent.manage", action="gap.register", target=agent_id)
     a = s.registry.get(agent_id)
     if not a:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} 不存在")

@@ -16,6 +16,7 @@ from .alerts import router as alerts_router
 from .stream import router as stream_router
 from .agents import router as agents_router
 from .workspaces import router as workspaces_router
+from .admin import router as admin_router
 
 __all__ = [
     "system_router",
@@ -27,4 +28,5 @@ __all__ = [
     "stream_router",
     "agents_router",
     "workspaces_router",
+    "admin_router",
 ]

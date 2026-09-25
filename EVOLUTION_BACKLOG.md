@@ -80,6 +80,11 @@
   `TELEOPS_OSS_ENABLED=1` 即写本地 `data/oss_mock/`；配齐 `TELEOPS_OSS_BUCKET/ENDPOINT/ACCESS_KEY/SECRET_KEY` 走
   boto3 S3 兼容真实桶）。复用 `/audit/export` 同一套隔离与过滤，保证「看得到的才能归档」。详见 `docs/04` 第 9 条与
   `src/core/oss.py`。术语：此处 OSS = Object Storage，与「真实电信 OSS 数据导入」是两件事。
+- **RBAC 引擎接线已在 v0.8.49 落地**：判定引擎 `auth.enforce` 此前完整但路由层零调用——本次经
+  `src/api/deps.py::assert_perm`（路由层唯一权限判定入口，无权即 403 + 审计留痕）把能力闸**正交叠加**到既有租户闸之上：
+  `stream_start` 加 `tool.exec`、`build_agent` + `register-gap` 加 `agent.manage`，实现 viewer/dev 被拦、sre/dev 各得所需；
+  新增 `GET/POST /admin/roles`（org.manage 闸，可运营分配/回收角色，含两道锁死闸）。不放松既有 admin-only 闸。
+  测试 `tests/test_rbac.py` 9/9。详见 `docs/04` 第 10 条。
 - Phase 2 垂直扩容（4/5/6）内部有依赖序：先 Postgres → 再多 worker → 再 Caddy 多后端。
 
 ## 下一步候选（等用户拍板）
