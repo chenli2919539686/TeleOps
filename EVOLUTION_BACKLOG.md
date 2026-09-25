@@ -127,8 +127,10 @@
   `compileall` / `node --check web/app.js` / 全量 `pytest tests/ -q`。新增 `.ruff.toml`：只开
   E9/F63/F7/F82 关键规则（先守致命错误、再逐步收紧，避免首次跑红被迫挂 continue-on-error 使门禁失效）——
   上线即抓出 `src/workers/stream_tasks.py` 用了 `Any` 却未导入（F821，被 `from __future__ import annotations`
-  掩盖才没在运行时炸）。**已知覆盖缺口**：Redis/PG 集成用例在 CI 仍 skip（按 Windows 路径找
-  `tools/redis/redis-server.exe`），需改环境变量注入二进制路径才能真跑（待办）。
+  掩盖才没在运行时炸）。**v0.8.51 已消除 Redis 缺口**：测试 fixture 优先读 `TELEOPS_TEST_REDIS_URL`，
+  CI 起 `redis:7-alpine` service 并注入 → **D3 多副本状态共享 + 审批外部化两套回归守卫已在 CI 真跑并通过**。
+  Postgres 真连代码路径已就绪（`TELEOPS_TEST_PG_DSN` + 测试门内 `pip install psycopg || true`），但因
+  postgres service 在托管 runner 偶发拉取失败会让 job 变红，为保门禁稳定暂不纳入强制 CI（本地/Staging 有 PG 即真跑）。
 - **共享-DB flake 已修（不再有豁免项）**：`tests/test_audit_export.py` 的 `_insert_audit` 原直连共享 DB 连接、
   在 `db._LOCK` 之外 `commit()`，与异步审计写后台线程争用同一连接 → 报 `cannot commit - no transaction is active`。
   改为走线程安全的 `db.execute()`（持锁并提交）后全量稳定全绿；`test_oss_export` import 复用同一函数，一并修复。
